@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "ProposalStatus" ADD VALUE 'PARTIAL_FINALIZED';

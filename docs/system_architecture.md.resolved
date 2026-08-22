@@ -1,0 +1,643 @@
+# System Architecture & Database Design
+
+**Project:** Hoarding/OOH Backend  
+**Version:** Phase 1  
+**Stack:** Node.js + TypeScript + Express + Prisma + PostgreSQL + Redis
+
+---
+
+## Table of Contents
+1. [System Overview](#system-overview)
+2. [Architecture Layers](#architecture-layers)
+3. [Database Schema](#database-schema)
+4. [Backend Flow Diagrams](#backend-flow-diagrams)
+5. [Security Architecture](#security-architecture)
+6. [Scalability Considerations](#scalability-considerations)
+
+---
+
+## System Overview
+
+### Tech Stack
+```
+Frontend (Not in scope)
+    ↓
+Backend API (Node.js + Express)
+    ↓
+┌─────────────────┬─────────────────┐
+│   PostgreSQL    │      Redis      │
+│  (Primary DB)   │  (Sessions)     │
+└─────────────────┴─────────────────┘
+```
+
+### Key Components
+- **Express Server** - REST API server
+- **Prisma ORM** - Database access layer
+- **PostgreSQL** - Relational database
+- **Redis** - Session store & caching
+- **JWT** - Access token authentication
+- **bcrypt** - Password hashing
+- **Zod** - Request validation
+- **Winston** - Logging
+- **Jest** - Testing framework
+
+---
+
+## Architecture Layers
+
+### 1. Request Flow
+```
+Client Request
+    ↓
+Middleware Stack
+    ├── Helmet (Security Headers)
+    ├── CORS
+    ├── Rate Limiter (100 req/15min)
+    ├── Body Parser
+    └── Cookie Parser
+    ↓
+Routes
+    ├── /api/auth
+    ├── /api/hoardings
+    ├── /api/rent
+    ├── /api/notifications
+    ├── /api/dashboard
+    └── ...
+    ↓
+Authentication Middleware (except /auth/*)
+    ├── Verify JWT
+    ├── Check Redis session
+    └── Attach user to request
+    ↓
+RBAC Middleware (role-specific routes)
+    └── Check user role
+    ↓
+Validation Middleware (Zod schemas)
+    └── Validate request body/params
+    ↓
+Controller
+    └── Handle request logic
+    ↓
+Service Layer
+    └── Business logic
+    ↓
+Repository Layer
+    └── Database operations
+    ↓
+Database (PostgreSQL) / Cache (Redis)
+    ↓
+Response
+    ├── Success: { success: true, data: ... }
+    └── Error: { success: false, message: ... }
+```
+
+---
+
+### 2. Folder Structure
+```
+src/
+├── config/
+│   └── index.ts              # Environment config (Zod validated)
+├── controllers/
+│   ├── auth.controller.ts
+│   ├── hoarding.controller.ts
+│   ├── rent.controller.ts
+│   └── ...
+├── services/
+│   ├── auth.service.ts       # Business logic
+│   ├── hoarding.service.ts
+│   ├── rent.service.ts
+│   ├── email.service.ts
+│   └── ...
+├── repositories/
+│   ├── user.repository.ts    # DB operations
+│   ├── hoarding.repository.ts
+│   ├── rent.repository.ts
+│   └── ...
+├── middleware/
+│   ├── auth.middleware.ts    # JWT verification
+│   ├── rbac.middleware.ts    # Role checking
+│   ├── validation.middleware.ts
+│   ├── error.middleware.ts
+│   └── rateLimit.middleware.ts
+├── validators/
+│   ├── auth.validators.ts    # Zod schemas
+│   ├── hoarding.validators.ts
+│   └── ...
+├── routes/
+│   ├── index.ts              # Route aggregator
+│   ├── auth.routes.ts
+│   ├── hoarding.routes.ts
+│   └── ...
+├── lib/
+│   ├── prisma.ts             # Prisma client
+│   ├── redis.ts              # Redis client
+│   ├── security.ts           # Security utilities
+│   ├── logger.ts             # Winston logger
+│   ├── apiResponse.ts        # Response wrapper
+│   └── errors.ts             # Custom error classes
+├── jobs/
+│   ├── reminder.job.ts       # Rent reminder job
+│   └── sessionCleanup.job.ts
+├── types/
+│   └── authenticated-request.ts
+├── app.ts                    # Express app setup
+├── server.ts                 # Server entry point
+└── index.ts                  # Main entry
+```
+
+---
+
+## Database Schema
+
+### Entity Relationship Diagram
+
+```mermaid
+erDiagram
+    Role ||--o{ User : has
+    User ||--o{ RefreshSession : has
+    User ||--o{ UserDevice : has
+    User ||--o{ LocationLog : has
+    User ||--o{ Notification : receives
+    User ||--o{ Booking : creates
+    User ||--o{ UserTerritory : assigned
+    Territory ||--o{ UserTerritory : contains
+    Hoarding ||--o{ Booking : has
+    Hoarding ||--o| Rent : has
+    
+    Role {
+        int id PK
+        string name UK
+    }
+    
+    User {
+        string id PK
+        string name
+        string email UK
+        string phone UK
+        string password
+        int roleId FK
+        boolean isActive
+        datetime createdAt
+        datetime updatedAt
+    }
+    
+    RefreshSession {
+        string id PK
+        string userId FK
+        string deviceId
+        string refreshTokenHash
+        datetime issuedAt
+        datetime expiresAt
+        datetime inactivityExpiresAt
+        boolean revoked
+    }
+    
+    UserDevice {
+        string id PK
+        string userId FK
+        string deviceId
+        string deviceName
+        string platform
+        float lastLat
+        float lastLng
+        datetime lastSeen
+        boolean isRevoked
+    }
+    
+    Hoarding {
+        string id PK
+        string code UK
+        string title
+        string city
+        string area
+        float lat
+        float lng
+        int widthCm
+        int heightCm
+        string status
+        decimal baseRate
+        json rateHistory
+        json images
+    }
+    
+    Rent {
+        string id PK
+        string hoardingId FK UK
+        string partyType
+        decimal rentAmount
+        int incrementYear
+        string paymentMode
+        datetime lastPaymentDate
+        datetime nextDueDate
+    }
+    
+    Booking {
+        string id PK
+        string hoardingId FK
+        string createdBy FK
+        string clientName
+        string clientContact
+        datetime startDate
+        datetime endDate
+        string status
+        decimal price
+    }
+    
+    Notification {
+        string id PK
+        string userId FK
+        string title
+        string body
+        string link
+        boolean read
+        datetime createdAt
+    }
+    
+    LocationLog {
+        string id PK
+        string userId FK
+        string deviceId
+        string type
+        float lat
+        float lng
+        int accuracy
+        string note
+        datetime createdAt
+    }
+```
+
+---
+
+### Key Tables
+
+#### 1. Role
+```sql
+CREATE TABLE "Role" (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(255) UNIQUE NOT NULL
+);
+
+-- Phase 1 Roles
+INSERT INTO "Role" (name) VALUES 
+  ('owner'), ('manager'), ('sales'), ('designer'), ('fitter');
+```
+
+#### 2. User
+```sql
+CREATE TABLE "User" (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name VARCHAR(255) NOT NULL,
+  email VARCHAR(255) UNIQUE,
+  phone VARCHAR(50) UNIQUE,
+  password VARCHAR(255) NOT NULL,
+  "roleId" INTEGER REFERENCES "Role"(id),
+  "isActive" BOOLEAN DEFAULT true,
+  "createdAt" TIMESTAMP DEFAULT now(),
+  "updatedAt" TIMESTAMP DEFAULT now()
+);
+
+CREATE INDEX idx_user_role ON "User"("roleId");
+CREATE INDEX idx_user_email ON "User"(email);
+```
+
+#### 3. RefreshSession (Server-Side Session)
+```sql
+CREATE TABLE "RefreshSession" (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  "userId" UUID REFERENCES "User"(id),
+  "deviceId" VARCHAR(255) NOT NULL,
+  "refreshTokenHash" VARCHAR(255) NOT NULL,
+  "issuedAt" TIMESTAMP DEFAULT now(),
+  "lastUsedAt" TIMESTAMP DEFAULT now(),
+  "expiresAt" TIMESTAMP NOT NULL,
+  "inactivityExpiresAt" TIMESTAMP,
+  revoked BOOLEAN DEFAULT false
+);
+
+CREATE INDEX idx_session_user ON "RefreshSession"("userId");
+CREATE INDEX idx_session_device ON "RefreshSession"("deviceId");
+```
+
+#### 4. Hoarding
+```sql
+CREATE TABLE "Hoarding" (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  code VARCHAR(50) UNIQUE NOT NULL,
+  title VARCHAR(255),
+  city VARCHAR(100),
+  area VARCHAR(100),
+  landmark VARCHAR(255),
+  "roadName" VARCHAR(255),
+  side VARCHAR(10),
+  lat FLOAT,
+  lng FLOAT,
+  "widthCm" INTEGER,
+  "heightCm" INTEGER,
+  type VARCHAR(50),
+  ownership VARCHAR(50),
+  status VARCHAR(50) DEFAULT 'available',
+  "baseRate" DECIMAL(14,2),
+  "rateHistory" JSONB,
+  images JSONB,
+  "createdAt" TIMESTAMP DEFAULT now(),
+  "updatedAt" TIMESTAMP DEFAULT now()
+);
+
+CREATE INDEX idx_hoarding_city ON "Hoarding"(city);
+CREATE INDEX idx_hoarding_status ON "Hoarding"(status);
+```
+
+#### 5. Rent
+```sql
+CREATE TABLE "Rent" (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  "hoardingId" UUID UNIQUE REFERENCES "Hoarding"(id),
+  "partyType" VARCHAR(50) NOT NULL,
+  "rentAmount" DECIMAL(14,2) NOT NULL,
+  "incrementYear" INTEGER,
+  "paymentMode" VARCHAR(50) NOT NULL,
+  "lastPaymentDate" TIMESTAMP,
+  "nextDueDate" TIMESTAMP,
+  "createdAt" TIMESTAMP DEFAULT now()
+);
+
+CREATE INDEX idx_rent_due ON "Rent"("nextDueDate");
+```
+
+---
+
+## Backend Flow Diagrams
+
+### Authentication Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as API Server
+    participant DB as PostgreSQL
+    participant R as Redis
+
+    C->>API: POST /auth/login
+    API->>DB: Find user by email
+    DB-->>API: User record
+    API->>API: Verify password (bcrypt)
+    API->>API: Generate refresh token
+    API->>API: Hash refresh token (SHA-256)
+    API->>DB: Create RefreshSession
+    API->>R: Store session:ID → userId
+    API->>API: Generate JWT access token
+    API-->>C: { accessToken, refreshToken, user }
+    
+    Note over C: Access token expires in 15min
+    
+    C->>API: POST /auth/refresh
+    API->>API: Hash refresh token
+    API->>DB: Find session by hash
+    DB-->>API: Session record
+    API->>R: Check session:ID exists
+    R-->>API: Session valid
+    API->>R: Reset TTL (inactivity timeout)
+    API->>API: Generate new access token
+    API-->>C: { accessToken }
+```
+
+---
+
+### Rent Reminder Flow
+
+```mermaid
+sequenceDiagram
+    participant Owner as Owner
+    participant API as API Server
+    participant RJ as ReminderJob
+    participant DB as PostgreSQL
+    participant Email as Email Service
+
+    Owner->>API: POST /reminders/send { days: 7 }
+    API->>RJ: Execute reminder job
+    RJ->>DB: Find rents due in 7 days
+    DB-->>RJ: List of upcoming rents
+    RJ->>DB: Find owner users
+    DB-->>RJ: Owner email
+    
+    loop For each rent
+        RJ->>Email: Send reminder email
+        RJ->>DB: Create notification
+    end
+    
+    RJ-->>API: { sent: 3, errors: 0 }
+    API-->>Owner: Success response
+```
+
+---
+
+### RBAC Flow (Sales User Territory Filter)
+
+```mermaid
+sequenceDiagram
+    participant S as Sales User
+    participant API as API Server
+    participant Auth as Auth Middleware
+    participant RBAC as RBAC Middleware
+    participant Svc as HoardingService
+    participant DB as PostgreSQL
+
+    S->>API: GET /hoardings?city=Mumbai
+    API->>Auth: Verify JWT
+    Auth->>DB: Fetch user with territories
+    DB-->>Auth: User + territories (Mumbai, Pune)
+    Auth->>API: Attach user to request
+    API->>RBAC: Check role (sales allowed)
+    RBAC->>API: Authorized
+    API->>Svc: getAll(filters, user)
+    Svc->>Svc: Extract user territories
+    Svc->>Svc: Add territory filter (city IN [Mumbai, Pune])
+    Svc->>DB: SELECT * FROM Hoarding WHERE city IN (...)
+    DB-->>Svc: Filtered hoardings
+    Svc-->>API: Response
+    API-->>S: { hoardings: [...] }
+```
+
+---
+
+## Security Architecture
+
+### 1. Password Security
+- **Hashing:** bcrypt with 10 salt rounds
+- **Storage:** Never store plaintext passwords
+- **Validation:** Minimum requirements enforced via Zod
+
+### 2. Token Security
+- **Access Token (JWT):**
+  - Expiry: 15 minutes
+  - Signed with HS256
+  - Contains: userId, role, sessionId
+  
+- **Refresh Token:**
+  - Random 40-byte hex string
+  - Hashed with SHA-256 before storage
+  - Expires in 7 days
+  - Timing-safe comparison (`crypto.timingSafeEqual`)
+
+### 3. Session Management
+- **Server-side sessions** stored in PostgreSQL
+- **Redis mirror** for fast validation
+- **Inactivity timeout** (role-based: 45-60 mins)
+- **Device binding** via deviceId
+
+### 4. API Security
+- **Helmet** for security headers
+- **CORS** enabled
+- **Rate limiting** (100 req/15min per IP)
+- **Input validation** via Zod
+- **SQL injection prevention** via Prisma (parameterized queries)
+
+---
+
+## Scalability Considerations
+
+### Current Design (Phase 1)
+- Single server deployment
+- PostgreSQL primary database
+- Redis for session caching
+- Suitable for: 1,000-10,000 users, ~100 req/sec
+
+### Future Enhancements (Phase 2+)
+
+**Horizontal Scaling:**
+- Load balancer (Nginx/AWS ALB)
+- Multiple API server instances
+- Sticky sessions or JWT-only auth
+
+**Database Scaling:**
+- Read replicas for reporting queries
+- Connection pooling (Prisma already configured)
+- Partitioning large tables (LocationLog, AuditLog)
+
+**Caching:**
+- Redis caching for hoarding list
+- CDN for static assets
+- API response caching
+
+**Background Jobs:**
+- BullMQ for job queue
+- Separate worker processes
+- Scheduled cron jobs (reminders, cleanup)
+
+**Monitoring:**
+- APM (Application Performance Monitoring)
+- Error tracking (Sentry)
+- Metrics dashboard (Grafana)
+
+---
+
+## Performance Optimizations
+
+### Database Indexes
+```sql
+-- High-traffic queries
+CREATE INDEX idx_hoarding_city_status ON "Hoarding"(city, status);
+CREATE INDEX idx_rent_next_due ON "Rent"("nextDueDate") WHERE "nextDueDate" IS NOT NULL;
+CREATE INDEX idx_notification_user_created ON "Notification"("userId", "createdAt" DESC);
+CREATE INDEX idx_location_user_created ON "LocationLog"("userId", "createdAt" DESC);
+```
+
+### Query Optimization
+- Prisma includes only necessary relations
+- Pagination on all list endpoints
+- Aggregate queries for dashboard stats
+
+### Redis Usage
+- Session validation (avoid DB hit on every request)
+- Future: Cache frequently accessed hoardings
+- Future: Rate limit counters
+
+---
+
+## Deployment Architecture
+
+```
+┌─────────────────────────────────────┐
+│         Client (Browser/App)        │
+└────────────────┬────────────────────┘
+                 │ HTTPS
+                 ↓
+         ┌───────────────┐
+         │  Load Balancer│
+         │   (Optional)  │
+         └───────┬───────┘
+                 │
+      ┌──────────┴──────────┐
+      ↓                     ↓
+┌──────────┐          ┌──────────┐
+│ API Server│          │ API Server│
+│ (Node.js) │          │ (Node.js) │
+└─────┬────┘          └─────┬────┘
+      │                     │
+      └──────────┬──────────┘
+                 │
+      ┌──────────┴──────────┐
+      ↓                     ↓
+┌─────────────┐      ┌─────────────┐
+│ PostgreSQL  │      │   Redis     │
+│  (Primary)  │      │  (Cache)    │
+└─────────────┘      └─────────────┘
+```
+
+### Environment Variables
+```env
+NODE_ENV=production
+PORT=3000
+DATABASE_URL=postgresql://user:pass@host:5432/db
+REDIS_URL=redis://host:6379
+JWT_SECRET=<strong-secret>
+JWT_ACCESS_EXPIRATION=15m
+JWT_REFRESH_EXPIRATION_DAYS=7
+SMTP_HOST=smtp.example.com (optional)
+SMTP_PORT=587
+OWNER_EMAIL=owner@company.com
+```
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+- Service layer business logic
+- Repository layer methods
+- Utility functions
+
+### Integration Tests
+- API endpoint testing
+- Full request/response cycle
+- Database interactions
+- Authentication flows
+
+### Test Coverage
+- 28 integration tests passing
+- All core flows covered
+- Edge cases handled
+
+**Run Tests:**
+```bash
+npm run test           # All tests
+npm run test:unit      # Unit tests only
+npm run test:integration  # Integration tests
+npm run test:coverage  # Coverage report
+```
+
+---
+
+## Summary
+
+This Phase 1 backend provides:
+- ✅ Robust authentication & session management
+- ✅ Role-based access control
+- ✅ Complete hoarding & rent management
+- ✅ Notification & reminder system
+- ✅ Dashboard analytics
+- ✅ Comprehensive testing
+- ✅ Production-ready architecture
+
+The system is designed for scalability and maintainability, with clear separation of concerns and industry best practices throughout.

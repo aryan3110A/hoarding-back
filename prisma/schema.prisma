@@ -1,0 +1,1085 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Role {
+  id    Int    @id @default(autoincrement())
+  name  String @unique
+  users User[]
+}
+
+model User {
+  id            String           @id @default(uuid())
+  name          String
+  email         String?          @unique
+  phone         String?          @unique
+  password      String
+  roleId        Int
+  isActive      Boolean          @default(true)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  bookings      Booking[]        @relation("createdByBookings")
+  bookedHoardings Hoarding[]     @relation("BookedByUser")
+  locations     LocationLog[]
+  notifications Notification[]
+  sessions      RefreshSession[]
+  role          Role             @relation(fields: [roleId], references: [id])
+  devices       UserDevice[]
+  territories   UserTerritory[]
+  bookingTokens BookingToken[]   @relation("SalesUserTokens")
+  designerTokens BookingToken[]  @relation("DesignerTokens")
+  fitterTokens   BookingToken[]  @relation("FitterTokens")
+  extensionApprovedTokens BookingToken[] @relation("ExtensionApprovedBy")
+  releasedTokens BookingToken[] @relation("ReleasedBy")
+  supervisorChecklists SupervisorChecklist[] @relation("SupervisorChecklistUpdatedBy")
+  createdClients Client[]
+  proposals      Proposal[]
+  createdContracts Contract[]    @relation("ContractCreatedBy")
+  renewalReminderSentContracts Contract[] @relation("ContractRenewalReminderSentBy")
+  invoicesCreated Invoice[] @relation("InvoiceCreatedBy")
+  paymentsCreated Payment[] @relation("PaymentCreatedBy")
+  printingExpensesCreated PrintingExpense[] @relation("PrintingExpenseCreatedBy")
+  hoardingRenewals HoardingRenewal[]
+  enquiries      Enquiry[]
+  inquiries      Inquiry[]
+  assignedInquiries Inquiry[] @relation("InquiryAssignedSales")
+  salesMarketVisits SalesMarketVisit[]
+  todos             TodoItem[]
+  rateRequestsRequested RateApprovalRequest[] @relation("RateRequestedBy")
+  rateRequestsApproved  RateApprovalRequest[] @relation("RateApprovedBy")
+  chatbotQueryLogs      ChatbotQueryLog[]
+  landlordRentPayments  LandlordRentPayment[] @relation("LandlordRentRecordedBy")
+  maintenanceRecords    HoardingMaintenance[] @relation("MaintenanceCreatedBy")
+}
+
+model Territory {
+  id          String          @id @default(uuid())
+  name        String
+  city        String?
+  description String?
+  createdAt   DateTime        @default(now())
+  sales       UserTerritory[]
+}
+
+model Landlord {
+  id        String     @id @default(uuid())
+  name      String
+  phone     String?
+  email     String?
+  address   String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  hoardings Hoarding[]
+
+  @@index([name])
+  @@index([phone])
+}
+
+model UserTerritory {
+  userId      String
+  territoryId String
+  territory   Territory @relation(fields: [territoryId], references: [id])
+  user        User      @relation(fields: [userId], references: [id])
+
+  @@id([userId, territoryId])
+}
+
+model UserDevice {
+  id         String   @id @default(uuid())
+  userId     String
+  deviceId   String
+  deviceName String?
+  platform   String?
+  lastIp     String?
+  lastLat    Float?
+  lastLng    Float?
+  lastSeen   DateTime @default(now())
+  createdAt  DateTime @default(now())
+  isRevoked  Boolean  @default(false)
+  user       User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([deviceId])
+}
+
+model RefreshSession {
+  id                  String    @id @default(uuid())
+  userId              String
+  deviceId            String
+  refreshTokenHash    String
+  issuedAt            DateTime  @default(now())
+  lastUsedAt          DateTime  @default(now())
+  expiresAt           DateTime
+  inactivityExpiresAt DateTime?
+  ip                  String?
+  userAgent           String?
+  revoked             Boolean   @default(false)
+  user                User      @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([deviceId])
+}
+
+model LocationLog {
+  id        String   @id @default(uuid())
+  userId    String
+  deviceId  String?
+  type      String
+  lat       Float?
+  lng       Float?
+  accuracy  Int?
+  ip        String?
+  note      String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model Hoarding {
+  id              String        @id @default(uuid())
+  code            String        @unique
+  title           String?
+  city            String?
+  area            String?
+  landmark        String?
+  roadName        String?
+  side            String?
+  lat             Float?
+  lng             Float?
+  widthCm         Int?
+  heightCm        Int?
+  type            String?
+  ownership       String?
+  status          String        @default("available")
+  executionType   ExecutionType?
+  condition       HoardingCondition?
+  // Operational workflow state (separate from public availability status)
+  // Example values: UNDER_PROCESS, FITTER_ASSIGNED, FITTED
+  workflowState   String?
+  bookedById      String?
+  bookedAt        DateTime?
+  categoryId      String?
+  category        Category?    @relation(fields: [categoryId], references: [id])
+  standardRate    Decimal       @default(0) @map("standard_rate") @db.Decimal(14, 2)
+  minimumRate     Decimal       @default(0) @map("minimum_rate") @db.Decimal(14, 2)
+  finalRate       Decimal?      @map("final_rate") @db.Decimal(14, 2)
+  expiryDate      DateTime?     @map("expiry_date")
+  lastRenewedAt   DateTime?     @map("last_renewed_at")
+  actualLiveDate  DateTime?     @map("actual_live_date")
+  billingStartDate DateTime?    @map("billing_start_date")
+  billingStartOverrideDate DateTime? @map("billing_start_override_date")
+  billingPeriodOverrideNote String?  @map("billing_period_override_note")
+  remountStatus   RemountStatus?
+  remountRequestedBy String?    @map("remount_requested_by")
+  remountRequestedAt DateTime?  @map("remount_requested_at")
+  remountCompletedAt DateTime?  @map("remount_completed_at")
+  baseRate        Decimal?      @db.Decimal(14, 2)
+  rateHistory     Json?
+  images          Json?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  propertyGroupId String?       @db.VarChar(100)
+  landlordId      String?
+  bookings        Booking[]
+  landlord        Landlord?     @relation(fields: [landlordId], references: [id])
+  propertyRent    PropertyRent? @relation(fields: [propertyGroupId], references: [propertyGroupId])
+  rent            Rent?
+  tokens          BookingToken[] @relation("HoardingTokens")
+  supervisorChecklist SupervisorChecklist?
+  bookedBy        User?         @relation("BookedByUser", fields: [bookedById], references: [id])
+  proposalHoardings ProposalHoarding[]
+  renewals        HoardingRenewal[]
+  billingEvents   BillingEvent[]
+  installationDate DateTime?    @map("installation_date")
+  isDeleted       Boolean       @default(false) @map("is_deleted")
+  rateApprovalRequests RateApprovalRequest[]
+  inquiryHoardings     InquiryHoarding[]
+  maintenanceRecords   HoardingMaintenance[]
+
+  @@index([propertyGroupId])
+  @@index([landlordId])
+  @@index([categoryId])
+  @@index([isDeleted])
+}
+
+enum RemountStatus {
+  PENDING
+  COMPLETED
+}
+
+enum ExecutionType {
+  CLIENT_CDR
+  IN_HOUSE_DESIGN
+  CLIENT_DIRECT_FLEX
+}
+
+enum HoardingCondition {
+  GOOD
+  DAMAGED
+}
+
+model Booking {
+  id            String    @id @default(uuid())
+  hoardingId    String
+  clientName    String?
+  clientContact String?
+  startDate     DateTime?
+  endDate       DateTime?
+  status        String    @default("confirmed")
+  price         Decimal?  @db.Decimal(14, 2)
+  createdBy     String?
+  createdAt     DateTime  @default(now())
+  createdByUser User?     @relation("createdByBookings", fields: [createdBy], references: [id])
+  hoarding      Hoarding  @relation(fields: [hoardingId], references: [id])
+
+  @@index([hoardingId, startDate, endDate])
+}
+
+enum TokenStatus {
+  ACTIVE
+  CONFIRMED
+  // Phase-3 lifecycle (blocking + time management)
+  PENDING
+  BLOCKED
+  EXTENSION_REQUESTED
+  APPROVED
+  EXPIRED
+  RELEASED
+  CANCELLED
+}
+
+model BookingToken {
+  id            String      @id @default(uuid())
+  hoardingId    String
+  dateFrom      DateTime
+  dateTo        DateTime
+  plannedLiveDate DateTime?
+  salesUserId   String
+  clientId      String
+  status        TokenStatus @default(ACTIVE)
+  queuePosition Int
+  expiresAt     DateTime
+  createdAt     DateTime    @default(now())
+  durationMonths Int
+  notes         String?
+  paymentPlanType PaymentPlanType?
+  billingFrequency BillingFrequency?
+  gstApplicable Boolean    @default(false)
+  finalAgreedBasePrice Decimal? @db.Decimal(14, 2)
+  modeOfPayment String?
+  printingChargesBase Decimal @default(0) @db.Decimal(14, 2)
+  mountingChargesBase Decimal @default(0) @db.Decimal(14, 2)
+  poRequired    Boolean    @default(false)
+  poNotes       String?
+  expectedPoDate DateTime?
+
+  // Phase-3 blocking fields
+  blockedAt     DateTime?
+  blockDurationHours Int @default(48)
+  extensionRequestedAt DateTime?
+  extensionRequestedUntil DateTime?
+  extensionApprovedAt DateTime?
+  extensionApprovedById String?
+  releasedAt    DateTime?
+  releasedById  String?
+  releaseReason String?
+
+  // Designer assignment and design workflow
+  designerId    String?
+  designStatus  DesignStatus @default(PENDING)
+  designNotes   String?
+
+  // Fitter assignment and installation workflow
+  fitterId       String?
+  fitterStatus   FitterStatus @default(PENDING)
+  fitterNotes    String?
+  fitterAssignedAt DateTime?
+  fitterStartedAt  DateTime?
+  fitterCompletedAt DateTime?
+
+  // Installation proof images uploaded by fitter
+  installationImages Json?
+
+  hoarding      Hoarding    @relation("HoardingTokens", fields: [hoardingId], references: [id])
+  salesUser     User        @relation("SalesUserTokens", fields: [salesUserId], references: [id])
+  client        Client      @relation(fields: [clientId], references: [id])
+  designer      User?       @relation("DesignerTokens", fields: [designerId], references: [id])
+  fitter        User?       @relation("FitterTokens", fields: [fitterId], references: [id])
+  extensionApprovedBy User? @relation("ExtensionApprovedBy", fields: [extensionApprovedById], references: [id])
+  releasedBy    User?       @relation("ReleasedBy", fields: [releasedById], references: [id])
+  billingEvents BillingEvent[]
+
+  @@index([hoardingId, dateFrom, dateTo])
+  @@index([clientId])
+  @@index([designerId])
+  @@index([fitterId])
+  @@index([status, expiresAt])
+}
+
+enum DesignStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum FitterStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum PaymentPlanType {
+  ADVANCE_MONTHLY
+  ADVANCE_FULL_CAMPAIGN
+  ON_SPOT_LIVE
+  POST_MONTHLY
+  END_OF_CAMPAIGN
+  MONTHLY_IN_HAND
+}
+
+enum BillingFrequency {
+  MONTHLY
+  QUARTERLY
+  YEARLY
+  ONE_TIME
+}
+
+enum BillingEventStatus {
+  UPCOMING_SCHEDULED
+  TO_BE_GENERATED
+  PO_PENDING
+  OVERDUE
+  COMPLETED
+}
+
+model Client {
+  id           String   @id @default(uuid())
+
+  name         String
+  phone        String   @unique
+  email        String?
+  companyName  String?
+  billingCompanyName String?
+  billingPhone  String?
+  billingEmail  String?
+  gstin         String?
+  billingAddress String?
+
+  createdById  String?
+  createdBy    User?    @relation(fields: [createdById], references: [id])
+
+  tokens       BookingToken[]
+  proposals    Proposal[]
+  invoices     Invoice[]
+  printingExpenses PrintingExpense[]
+  inquiries    Inquiry[]
+  billingEvents BillingEvent[]
+
+  isActive     Boolean  @default(true)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([createdById])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  action     String
+  entityType String?
+  entityId   String?
+  payload    Json?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+}
+
+model SupervisorChecklist {
+  id                String   @id @default(uuid())
+  hoardingId        String   @unique
+  isCorrectSize     Boolean  @default(false)
+  isGoodCondition   Boolean  @default(false)
+  isFlexReceived    Boolean  @default(false)
+  isReadyForInstall Boolean  @default(false)
+  isSiteImageUploaded Boolean @default(false)
+  siteImages         Json?
+  updatedById       String
+  updatedAt         DateTime @updatedAt
+
+  hoarding   Hoarding @relation(fields: [hoardingId], references: [id])
+  updatedBy  User     @relation("SupervisorChecklistUpdatedBy", fields: [updatedById], references: [id])
+
+  @@index([updatedById])
+}
+
+model Rent {
+  id              String    @id @default(uuid())
+  hoardingId      String    @unique
+  partyType       String
+  rentAmount      Decimal   @db.Decimal(14, 2)
+  incrementYear   Int?
+  paymentMode     String
+  lastPaymentDate DateTime?
+  nextDueDate     DateTime?
+  createdAt       DateTime  @default(now())
+  hoarding        Hoarding  @relation(fields: [hoardingId], references: [id])
+}
+
+model PropertyRent {
+  id                  String           @id @default(uuid())
+  propertyGroupId     String           @unique
+  location            String?
+  rentAmount          Decimal          @db.Decimal(14, 2)
+  incrementCycleYears Int              @default(1)
+  incrementRate       Decimal          @default(0.10) @db.Decimal(5, 2)
+  paymentFrequency    PaymentFrequency
+  lastPaymentDate     DateTime?
+  nextDueDate         DateTime?
+  reminderDays        Int[]
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+  landlord            String?
+  hoardings           Hoarding[]
+  payments            LandlordRentPayment[]
+
+  // New rent increment fields
+  baseRent             Decimal?        @db.Decimal(14, 2)
+  rentStartDate        DateTime?
+  incrementType        IncrementType?  @default(PERCENTAGE)
+  incrementValue       Decimal?        @db.Decimal(14, 2)
+  incrementSchedule    Json?
+  lastIncrementDate    DateTime?
+  nextIncrementDate    DateTime?
+  // Amount already paid against the current unpaid due cycle
+  currentCyclePaidAmount Decimal       @default(0) @db.Decimal(14, 2)
+}
+
+model LandlordRentPayment {
+  id             String   @id @default(uuid())
+  propertyRentId String
+  landlord       String?
+  dueDate        DateTime
+  rentAmountDue  Decimal  @db.Decimal(14, 2)
+  amountPaid     Decimal  @db.Decimal(14, 2)
+  paymentDate    DateTime
+  paymentMode    String
+  remarks        String?
+  screenshotUrl  String?
+  screenshotPath String?
+  recordedById   String?
+  createdAt      DateTime @default(now())
+
+  propertyRent PropertyRent @relation(fields: [propertyRentId], references: [id], onDelete: Cascade)
+  recordedBy   User?        @relation("LandlordRentRecordedBy", fields: [recordedById], references: [id])
+
+  @@index([propertyRentId])
+  @@index([dueDate])
+  @@index([paymentDate])
+  @@index([recordedById])
+}
+
+model HoardingMaintenance {
+  id              String   @id @default(uuid())
+  hoardingId      String
+  maintenanceType String
+  maintenanceDate DateTime
+  performedBy     String
+  remarks         String?
+  photoUrl        String?
+  photoPath       String?
+  createdById     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  hoarding  Hoarding @relation(fields: [hoardingId], references: [id], onDelete: Cascade)
+  createdBy User?    @relation("MaintenanceCreatedBy", fields: [createdById], references: [id])
+
+  @@index([hoardingId])
+  @@index([maintenanceDate])
+  @@index([createdById])
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  title     String
+  body      String
+  link      String?
+  // Optional idempotency key to prevent duplicate notifications for the same event
+  dedupeKey String?  @unique
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+enum PaymentFrequency {
+  Monthly
+  Quarterly
+  HalfYearly
+  Yearly
+}
+
+enum IncrementType {
+  PERCENTAGE
+  AMOUNT
+}
+
+enum ProposalMode {
+  WITH_RATE
+  WITHOUT_RATE
+}
+
+enum ProposalDiscountType {
+  FLAT
+  PERCENT
+}
+
+enum ProposalStatus {
+  DRAFT
+  SENT
+  PARTIAL_FINALIZED
+  FINALIZED
+}
+
+model Proposal {
+  id         String             @id @default(uuid())
+  clientId   String
+  salesUserId String
+  proposalDate DateTime
+  mode       ProposalMode       @default(WITH_RATE)
+  status     ProposalStatus     @default(DRAFT)
+
+  // Global pricing controls
+  globalDiscountPct Decimal     @default(0) @db.Decimal(5, 2)
+  discountType      ProposalDiscountType @default(PERCENT)
+  discountValue     Float       @default(0)
+  printingCharges   Float       @default(0)
+  mountingCharges   Float       @default(0)
+  includeGst        Boolean     @default(false)
+  gstRatePct        Decimal     @default(18) @db.Decimal(5, 2)
+
+  // PDF storage metadata (deterministic PDF generated from snapshots)
+  pdfPath          String?
+  pdfGeneratedAt   DateTime?
+
+  sentAt           DateTime?
+  finalizedAt      DateTime?
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+
+  client     Client             @relation(fields: [clientId], references: [id])
+  salesUser  User               @relation(fields: [salesUserId], references: [id])
+  hoardings  ProposalHoarding[]
+  rateApprovalRequests RateApprovalRequest[]
+
+  @@index([clientId])
+  @@index([salesUserId])
+  @@index([status])
+}
+
+model ProposalHoarding {
+  id         String   @id @default(uuid())
+  proposalId String
+  hoardingId String?
+
+  // Snapshot fields captured at proposal time (do not mutate after SENT/FINALIZED)
+  hoardingCode     String
+  city             String?
+  area             String?
+  location         String?
+  sizeLabel        String?
+  type             String?
+
+  // Pricing snapshot
+  baseRate         Decimal?  @db.Decimal(14, 2)
+  discountPct      Decimal   @default(0) @db.Decimal(5, 2)
+  illumination     Boolean   @default(false)
+  illuminationCost Decimal   @default(0) @db.Decimal(14, 2)
+  finalRate        Decimal   @default(0) @db.Decimal(14, 2)
+
+  // Per-hoarding snapshot size & printing/mounting charges
+  widthCm          Int?
+  heightCm         Int?
+  printingRate     Decimal   @default(0) @db.Decimal(14, 2)
+  mountingRate     Decimal   @default(0) @db.Decimal(14, 2)
+  printingCharges  Decimal   @default(0) @db.Decimal(14, 2)
+  mountingCharges  Decimal   @default(0) @db.Decimal(14, 2)
+
+  // Rate approval status
+  rateApprovalStatus String  @default("APPROVED") // PENDING_APPROVAL, APPROVED, REJECTED, NOT_REQUIRED
+
+  // Stable ordering for PDF/table rendering
+  orderIndex       Int       @default(0)
+
+  proposal   Proposal @relation(fields: [proposalId], references: [id])
+  hoarding   Hoarding? @relation(fields: [hoardingId], references: [id], onDelete: SetNull)
+
+  @@index([proposalId])
+  @@index([hoardingId])
+}
+
+model Contract {
+  id             String   @id @default(uuid())
+  contractNumber String   @unique
+
+  clientId       String
+  hoardingId     String
+  bookingId      String?
+
+  startDate      DateTime? // Set automatically when hoarding is FITTED
+  endDate        DateTime? // startDate + duration
+
+  durationMonths Int        // 3, 6, 12, etc.
+
+  basePrice      Decimal   @db.Decimal(14, 2)
+  totalValue     Decimal   @db.Decimal(14, 2)
+  paymentTerms   String    // Monthly, Quarterly, One-Time
+
+  // Denormalized display fields for quick UI rendering
+  clientName     String?
+  hoardingCode   String?
+
+  status         ContractStatus
+
+  renewalMessageSent     Boolean   @default(false)
+  renewalMessageSentAt   DateTime?
+  renewalMessageSentById String?
+  renewalMessageSentBy   User?     @relation("ContractRenewalReminderSentBy", fields: [renewalMessageSentById], references: [id])
+
+  activatedAt    DateTime? // When fitter completes installation
+
+  renewedFromId  String?
+  renewedFrom    Contract? @relation("ContractRenewal", fields: [renewedFromId], references: [id])
+  renewals       Contract[] @relation("ContractRenewal")
+
+  createdById    String
+  createdBy      User      @relation("ContractCreatedBy", fields: [createdById], references: [id])
+
+  invoices       Invoice[]
+  printingExpenses PrintingExpense[]
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([clientId])
+  @@index([hoardingId])
+  @@index([status])
+  @@index([renewalMessageSent])
+}
+
+model HoardingRenewal {
+  id                 String   @id @default(uuid())
+  hoardingId         String
+  previousExpiryDate DateTime? @map("previous_expiry_date")
+  newExpiryDate      DateTime  @map("new_expiry_date")
+  renewedBy          String    @map("renewed_by")
+  renewedAt          DateTime  @default(now()) @map("renewed_at")
+  newAmount          Decimal   @map("new_amount") @db.Decimal(14, 2)
+  tenure             Int
+  remountRequired    Boolean   @default(false) @map("remount_required")
+  createdAt          DateTime  @default(now())
+
+  hoarding Hoarding @relation(fields: [hoardingId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [renewedBy], references: [id])
+
+  @@index([hoardingId])
+  @@index([renewedBy])
+  @@index([renewedAt(sort: Desc)])
+}
+
+enum ContractStatus {
+  PENDING_ACTIVATION
+  ACTIVE
+  EXPIRING_SOON
+  COMPLETED
+  CANCELLED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  VOID
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  UPI
+  CHEQUE
+  CARD
+  OTHER
+}
+
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+}
+
+model Invoice {
+  id            String   @id @default(uuid())
+  invoiceNumber String   @unique
+
+  clientId      String
+  contractId    String?
+  billingFirm   String?
+  billPdfPath   String?
+
+  issueDate     DateTime @default(now())
+  dueDate       DateTime?
+
+  subtotal      Decimal  @db.Decimal(14, 2)
+  taxAmount     Decimal  @default(0) @db.Decimal(14, 2)
+  totalAmount   Decimal  @db.Decimal(14, 2)
+  paidAmount    Decimal  @default(0) @db.Decimal(14, 2)
+
+  status        InvoiceStatus @default(ISSUED)
+  notes         String?
+  reminderAt    DateTime?
+  reminderNote  String?
+  lastReminderSentAt DateTime?
+
+  createdById   String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  client        Client   @relation(fields: [clientId], references: [id])
+  contract      Contract? @relation(fields: [contractId], references: [id])
+  createdBy     User     @relation("InvoiceCreatedBy", fields: [createdById], references: [id])
+  payments      Payment[]
+  billingEvents BillingEvent[]
+
+  @@index([clientId])
+  @@index([contractId])
+  @@index([status])
+  @@index([createdById])
+}
+
+model Payment {
+  id          String   @id @default(uuid())
+  invoiceId   String
+  amount      Decimal  @db.Decimal(14, 2)
+  method      PaymentMethod
+  status      PaymentStatus @default(CONFIRMED)
+  reference   String?
+  paidAt      DateTime @default(now())
+  notes       String?
+  createdById String
+  createdAt   DateTime @default(now())
+
+  invoice     Invoice @relation(fields: [invoiceId], references: [id])
+  createdBy   User    @relation("PaymentCreatedBy", fields: [createdById], references: [id])
+
+  @@index([invoiceId])
+  @@index([createdById])
+  @@index([paidAt])
+}
+
+model PrintingExpense {
+  id          String   @id @default(uuid())
+  contractId  String?
+  clientId    String?
+  description String
+  amount      Decimal  @db.Decimal(14, 2)
+  incurredOn  DateTime @default(now())
+  vendor      String?
+  notes       String?
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  contract    Contract? @relation(fields: [contractId], references: [id])
+  client      Client?   @relation(fields: [clientId], references: [id])
+  createdBy   User      @relation("PrintingExpenseCreatedBy", fields: [createdById], references: [id])
+
+  @@index([contractId])
+  @@index([clientId])
+  @@index([createdById])
+  @@index([incurredOn])
+}
+
+model BillingEvent {
+  id            String   @id @default(uuid())
+  hoardingId     String
+  bookingTokenId String
+  clientId       String
+  invoiceId      String?
+  cycleNumber    Int
+  status         BillingEventStatus @default(UPCOMING_SCHEDULED)
+  periodStart    DateTime
+  periodEnd      DateTime
+  dueAt          DateTime
+  billingAnchorDate DateTime
+  liveEligibleAt DateTime?
+  notificationSentAt DateTime?
+  poPendingAt    DateTime?
+  overdueAt      DateTime?
+  completedAt    DateTime?
+  baseAmount     Decimal  @db.Decimal(14, 2)
+  gstApplicable  Boolean  @default(false)
+  gstRatePct     Decimal  @default(18) @db.Decimal(5, 2)
+  gstAmount      Decimal  @default(0) @db.Decimal(14, 2)
+  totalAmount    Decimal  @db.Decimal(14, 2)
+  printingBase   Decimal  @default(0) @db.Decimal(14, 2)
+  printingGst    Decimal  @default(0) @db.Decimal(14, 2)
+  printingTotal  Decimal  @default(0) @db.Decimal(14, 2)
+  mountingBase   Decimal  @default(0) @db.Decimal(14, 2)
+  mountingGst    Decimal  @default(0) @db.Decimal(14, 2)
+  mountingTotal  Decimal  @default(0) @db.Decimal(14, 2)
+  paymentPlanType PaymentPlanType
+  billingFrequency BillingFrequency
+  modeOfPayment  String?
+  remarks        String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  hoarding       Hoarding     @relation(fields: [hoardingId], references: [id])
+  bookingToken   BookingToken @relation(fields: [bookingTokenId], references: [id])
+  client         Client       @relation(fields: [clientId], references: [id])
+  invoice        Invoice?     @relation(fields: [invoiceId], references: [id])
+
+  @@unique([bookingTokenId, cycleNumber])
+  @@index([clientId, status])
+  @@index([hoardingId])
+  @@index([status, dueAt])
+  @@index([bookingTokenId])
+  @@index([invoiceId])
+}
+
+enum InquiryStatus {
+  OPEN
+  LOCKED
+  CLOSED
+}
+
+enum InquiryPerformanceStage {
+  IN_PROCESS
+  WON
+  FOLLOW_UP_LATER
+  DEAD
+  NOT_INTERESTED
+}
+
+enum FollowupStatus {
+  PENDING
+  DONE
+}
+
+enum InquirySource {
+  PHONE
+  EMAIL
+  MESSAGE
+  WHATSAPP
+  OTHER
+  WALK_IN
+  SELF_GENERATED
+  VIA_TELEPHONIC
+  VIA_WHATSAPP
+  REFERENCE
+  OTHERS
+}
+
+enum EnquirySource {
+  WALK_IN
+  SELF_GENERATED
+  VIA_TELEPHONIC
+  VIA_WHATSAPP
+  REFERENCE
+  OTHERS
+}
+
+model Inquiry {
+  id          String        @id @default(uuid())
+  clientName  String
+  companyName String?
+  phone       String
+  email       String?
+  city        String
+  area        String
+  location    String
+  purpose     String?
+  status      InquiryStatus @default(OPEN)
+  performanceStage InquiryPerformanceStage @default(IN_PROCESS)
+  source      InquirySource @default(WALK_IN)
+  firstContactDate DateTime?      @map("first_contact_date")
+  nextFollowupDate DateTime?      @map("next_followup_date")
+  followupStatus   FollowupStatus @default(PENDING) @map("followup_status")
+
+  clientId    String?
+  client      Client?       @relation(fields: [clientId], references: [id])
+
+  assignedSalesId String?
+  assignedSales   User?      @relation("InquiryAssignedSales", fields: [assignedSalesId], references: [id])
+
+  categoryId String?
+  category   Category?    @relation(fields: [categoryId], references: [id])
+
+  createdById String
+  createdBy   User          @relation(fields: [createdById], references: [id])
+  interestedHoardings String? @map("interested_hoardings")
+  interestedHoardingLinks InquiryHoarding[]
+
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([phone])
+  @@index([email])
+  @@index([clientName])
+  @@index([companyName])
+  @@index([clientId])
+  @@index([assignedSalesId])
+  @@index([categoryId])
+  @@index([nextFollowupDate])
+  @@index([city, area, location])
+}
+
+model SalesMarketVisit {
+  id            String   @id @default(uuid())
+  userId        String
+  visitDate     DateTime
+  visitedMarket Boolean  @default(true)
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user          User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, visitDate])
+  @@index([visitDate])
+  @@index([userId])
+}
+
+model Category {
+  id        String    @id @default(uuid())
+  name      String    @unique
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  inquiries Inquiry[]
+  hoardings Hoarding[]
+}
+
+model Enquiry {
+  id           String   @id @default(uuid())
+  clientName   String
+  contact      String
+  source       EnquirySource?
+  preferredArea String?
+  campaignDates String?
+  budget       String?
+  hoardingId   String?
+  assignedToId String?
+  notes        String?
+
+  createdById  String
+  createdBy    User     @relation(fields: [createdById], references: [id])
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([hoardingId])
+  @@index([assignedToId])
+}
+
+model DeletedHoarding {
+  id          String   @id @default(uuid())
+  hoardingId  String   @unique
+  code        String
+  city        String?
+  area        String?
+  landmark    String?
+  deletedAt   DateTime @default(now())
+  deletedById String?
+  originalStatus String
+  data        Json     // Full backup of hoarding details
+}
+
+model TodoItem {
+  id          String    @id @default(uuid())
+  title       String
+  description String?
+  dueDate     DateTime?
+  status      String    @default("pending") // pending, done
+  createdById String
+  createdBy   User      @relation(fields: [createdById], references: [id])
+  visibility  String    @default("private") // private, public, role, company
+  roleName    String?   // if visibility is role
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+enum RateApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model RateApprovalRequest {
+  id              String             @id @default(uuid())
+  proposalId      String
+  hoardingId      String
+  proposedRate    Decimal            @db.Decimal(14, 2)
+  reason          String
+  remarks         String?
+  status          RateApprovalStatus @default(PENDING)
+  requestedById   String
+  requestedAt     DateTime           @default(now())
+  approvedById    String?
+  approvedAt      DateTime?
+  approverRemarks String?
+  rejectionReason String?
+
+  proposal        Proposal           @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  hoarding        Hoarding           @relation(fields: [hoardingId], references: [id], onDelete: Cascade)
+  requestedBy     User               @relation("RateRequestedBy", fields: [requestedById], references: [id])
+  approvedBy      User?              @relation("RateApprovedBy", fields: [approvedById], references: [id])
+
+  @@index([proposalId])
+  @@index([hoardingId])
+  @@index([requestedById])
+  @@index([approvedById])
+}
+
+model InquiryHoarding {
+  id         String   @id @default(uuid())
+  inquiryId  String
+  hoardingId String
+
+  inquiry    Inquiry  @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
+  hoarding   Hoarding @relation(fields: [hoardingId], references: [id], onDelete: Cascade)
+
+  @@unique([inquiryId, hoardingId])
+  @@index([inquiryId])
+  @@index([hoardingId])
+}
+
+model ChatbotQueryLog {
+  id               String   @id @default(uuid())
+  userId           String
+  role             String   @default("unknown")
+  queryText        String
+  detectedLanguage String?
+  intent           String?
+  appliedFilters   Json?
+  success          Boolean  @default(true)
+  errorCode        String?
+  modulesAccessed  String[] @default([])
+  responseSummary  String?
+  createdAt        DateTime @default(now())
+  user             User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([createdAt(sort: Desc)])
+}

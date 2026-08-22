@@ -1,0 +1,636 @@
+# Frontend Integration Guide
+
+**Project:** Hoarding/OOH Backend API  
+**Base URL:** `http://localhost:3000/api`  
+**Version:** Phase 1
+
+## Table of Contents
+1. [Authentication Flow](#authentication-flow)
+2. [API Endpoints](#api-endpoints)
+3. [Request/Response Schemas](#requestresponse-schemas)
+4. [Error Handling](#error-handling)
+5. [Security & Headers](#security--headers)
+
+---
+
+## Authentication Flow
+
+### 1. Login
+**Endpoint:** `POST /api/auth/login`
+
+**Request:**
+```json
+{
+  "email": "owner@demo.com",
+  "password": "Password@123",
+  "deviceId": "client-generated-uuid",
+  "deviceName": "Chrome on MacOS",
+  "lat": 19.0760,
+  "lng": 72.8777
+}
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "message": "Success",
+  "data": {
+    "accessToken": "eyJhbGciOiJIUzI1NiIs...",
+    "refreshToken": "a7b3c4d5e6f7g8h9i0j1k2l3...",
+    "user": {
+      "id": "uuid",
+      "name": "Owner User",
+      "email": "owner@demo.com",
+      "role": "owner"
+    }
+  }
+}
+```
+
+**Storage:**
+- Store `accessToken` in memory/state (expires in 15 mins)
+- Store `refreshToken` in httpOnly cookie or secure storage
+- Store `user` object in state/context
+
+---
+
+### 2. Refresh Token
+**Endpoint:** `POST /api/auth/refresh`
+
+**Request:**
+```json
+{
+  "refreshToken": "a7b3c4d5e6f7g8h9i0j1k2l3..."
+}
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "message": "Success",
+  "data": {
+    "accessToken": "eyJhbGciOiJIUzI1NiIs..."
+  }
+}
+```
+
+**When to call:**
+- When you receive 401 error on API calls
+- Proactively before access token expires (14 mins)
+
+---
+
+### 3. Logout
+**Endpoint:** `POST /api/auth/logout`
+
+**Request:**
+```json
+{
+  "refreshToken": "a7b3c4d5e6f7g8h9i0j1k2l3..."
+}
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "message": "Logged out successfully",
+  "data": null
+}
+```
+
+---
+
+## API Endpoints
+
+### Protected Endpoints
+All endpoints except `/auth/*` require the `Authorization` header:
+
+```
+Authorization: Bearer <accessToken>
+```
+
+---
+
+### Hoarding Management
+
+#### List Hoardings
+**GET** `/api/hoardings?page=1&limit=10&city=Mumbai&area=Bandra&status=available`
+
+**Query Parameters:**
+- `page` (optional, default: 1)
+- `limit` (optional, default: 10)
+- `city` (optional)
+- `area` (optional)
+- `status` (optional: available, occupied)
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Success",
+  "data": {
+    "hoardings": [
+      {
+        "id": "uuid",
+        "code": "H001",
+        "title": "Main Road Billboard",
+        "city": "Mumbai",
+        "area": "Bandra",
+        "landmark": "Near Station",
+        "roadName": "S.V. Road",
+        "side": "LHS",
+        "lat": 19.0760,
+        "lng": 72.8777,
+        "widthCm": 2000,
+        "heightCm": 1000,
+        "type": "Digital",
+        "ownership": "Own",
+        "status": "available",
+        "baseRate": "100000.00",
+        "createdAt": "2025-01-01T00:00:00Z"
+      }
+    ],
+    "total": 50
+  }
+}
+```
+
+---
+
+#### Get Hoarding Details
+**GET** `/api/hoardings/:id`
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "uuid",
+    "code": "H001",
+    "title": "Main Road Billboard",
+    // ... all hoarding fields
+  }
+}
+```
+
+---
+
+#### Create Hoarding (Admin/Owner Only)
+**POST** `/api/hoardings`
+
+**Request:**
+```json
+{
+  "code": "H009",
+  "title": "New Hoarding",
+  "city": "Mumbai",
+  "area": "Bandra",
+  "lat": 19.0760,
+  "lng": 72.8777,
+  "widthCm": 2000,
+  "heightCm": 1000,
+  "status": "available",
+  "baseRate": 75000
+}
+```
+
+**Validation:**
+- `code` - Required, unique
+- `city` - Optional string
+- `lat/lng` - Optional numbers
+- `status` - Optional, default: "available"
+
+---
+
+### Rent Management
+
+#### Get Rent Details (Owner/Admin Only)
+**GET** `/api/hoardings/:hoardingId/rent`
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "uuid",
+    "hoardingId": "uuid",
+    "partyType": "Private",
+    "rentAmount": "50000.00",
+    "incrementYear": 2026,
+    "paymentMode": "Monthly",
+    "lastPaymentDate": "2025-01-01T00:00:00Z",
+    "nextDueDate": "2025-02-01T00:00:00Z",
+    "createdAt": "2025-01-01T00:00:00Z"
+  }
+}
+```
+
+---
+
+#### Save/Update Rent (Owner/Admin Only)
+**POST** `/api/hoardings/:hoardingId/rent`
+
+**Request:**
+```json
+{
+  "partyType": "Private",
+  "rentAmount": 50000,
+  "incrementYear": 2026,
+  "paymentMode": "Monthly",
+  "lastPaymentDate": "2025-01-15"
+}
+```
+
+**Party Types:**
+- `Government`
+- `Private`
+- `Friend`
+
+**Payment Modes:**
+- `Monthly` - Due date = last payment + 1 month
+- `Quarterly` - Due date = last payment + 3 months
+- `Half-Yearly` - Due date = last payment + 6 months
+- `Yearly` - Due date = last payment + 1 year
+
+---
+
+#### Recalculate Rent (Owner Only)
+**POST** `/api/hoardings/:hoardingId/rent/recalculate`
+
+**Request:** Empty body `{}`
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Rent recalculated successfully",
+  "data": {
+    "id": "uuid",
+    "rentAmount": "55000.00",
+    "incrementYear": 2027
+  }
+}
+```
+
+**Logic:** Applies 10% increment and updates increment year.
+
+---
+
+### Dashboard (Owner Only)
+
+#### Get Dashboard Stats
+**GET** `/api/dashboard/owner`
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "totalHoardingsOnRent": 15,
+    "totalRentAmount": "750000.00",
+    "totalAnnualizedRent": 9000000,
+    "upcomingDues": [
+      {
+        "id": "uuid",
+        "rentAmount": "50000.00",
+        "nextDueDate": "2025-02-01T00:00:00Z",
+        "hoarding": {
+          "code": "H001",
+          "title": "Main Road Billboard",
+          "city": "Mumbai"
+        }
+      }
+    ]
+  }
+}
+```
+
+**Metrics:**
+- `totalRentAmount` - Raw sum of all rent amounts
+- `totalAnnualizedRent` - Rent normalized to yearly (Monthly × 12, Quarterly × 4, etc.)
+
+---
+
+### Notifications
+
+#### Get Notifications
+**GET** `/api/notifications?page=1&limit=20`
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "uuid",
+      "title": "Rent Due Reminder",
+      "body": "Rent for H001 is due on 2025-02-01",
+      "link": "/hoardings/uuid/rent",
+      "read": false,
+      "createdAt": "2025-01-25T00:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+#### Get Unread Count
+**GET** `/api/notifications/unread-count`
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "count": 5
+  }
+}
+```
+
+---
+
+#### Mark as Read
+**PUT** `/api/notifications/:id/read`
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Notification marked as read"
+}
+```
+
+---
+
+### Reminders (Owner Only)
+
+#### Trigger Manual Reminder
+**POST** `/api/reminders/send`
+
+**Request:**
+```json
+{
+  "days": 7
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Reminders sent successfully",
+  "data": {
+    "sent": 3,
+    "errors": 0
+  }
+}
+```
+
+---
+
+### Bookings (Admin Only)
+
+#### Create Booking
+**POST** `/api/bookings`
+
+**Request:**
+```json
+{
+  "hoardingId": "uuid",
+  "clientName": "ABC Corp",
+  "clientContact": "+91-9876543210",
+  "startDate": "2025-02-01",
+  "endDate": "2025-03-01",
+  "price": 100000,
+  "status": "confirmed"
+}
+```
+
+**Validation:**
+- Date overlap check performed
+- Start date must be before end date
+- Hoarding must exist
+
+---
+
+### Device & Location
+
+#### Device Ping
+**POST** `/api/devices/:deviceId/ping`
+
+**Request:**
+```json
+{
+  "lat": 19.0760,
+  "lng": 72.8777
+}
+```
+
+---
+
+#### Manual Checkin
+**POST** `/api/devices/:deviceId/checkin`
+
+**Request:**
+```json
+{
+  "lat": 19.0760,
+  "lng": 72.8777,
+  "accuracy": 10,
+  "note": "Visited Hoarding H001"
+}
+```
+
+---
+
+## Error Handling
+
+### Standard Error Response
+```json
+{
+  "success": false,
+  "message": "Error message here",
+  "error": {
+    // Optional error details in development
+  }
+}
+```
+
+### HTTP Status Codes
+- `200` - Success
+- `201` - Created
+- `400` - Bad Request (validation error)
+- `401` - Unauthorized (invalid/expired token)
+- `403` - Forbidden (insufficient permissions)
+- `404` - Not Found
+- `500` - Internal Server Error
+
+### Common Errors
+
+**401 Unauthorized:**
+```json
+{
+  "success": false,
+  "message": "Invalid token"
+}
+```
+**Action:** Refresh token or redirect to login
+
+**403 Forbidden:**
+```json
+{
+  "success": false,
+  "message": "Insufficient permissions"
+}
+```
+**Action:** Show error message
+
+**400 Validation Error:**
+```json
+{
+  "success": false,
+  "message": "Validation failed",
+  "error": {
+    "issues": [
+      {
+        "path": ["email"],
+        "message": "Invalid email format"
+      }
+    ]
+  }
+}
+```
+
+---
+
+## Security & Headers
+
+### Required Headers
+
+**For all protected endpoints:**
+```
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+```
+
+**For login (optional):**
+```
+X-Forwarded-For: <client-ip>
+User-Agent: <browser-info>
+```
+
+### Rate Limiting
+- **Limit:** 100 requests per 15 minutes per IP
+- **Response (429):**
+```json
+{
+  "success": false,
+  "message": "Too many requests"
+}
+```
+
+---
+
+## Integration Checklist
+
+### Frontend Setup
+- [ ] Configure base URL (`http://localhost:3000/api`)
+- [ ] Implement token storage (access token in memory, refresh token secure)
+- [ ] Add Authorization header to all protected requests
+- [ ] Implement token refresh logic (on 401 errors)
+- [ ] Handle role-based UI rendering
+- [ ] Implement error handling for all status codes
+
+### Authentication
+- [ ] Login form with email/password
+- [ ] Store user object in global state
+- [ ] Display user role in header
+- [ ] Auto-refresh token before expiry
+- [ ] Logout and clear tokens
+
+### Role-Based UI
+- [ ] Owner - Full dashboard access
+- [ ] Manager - Admin screens
+- [ ] Sales - Territory-filtered hoarding list
+- [ ] Designer/Fitter - Limited screens
+
+### Features to Build
+- [ ] Hoarding master list with filters
+- [ ] Hoarding detail view
+- [ ] Rent management screen (Owner/Admin)
+- [ ] Dashboard with KPIs (Owner)
+- [ ] Notification bell with unread count
+- [ ] Reminder trigger button (Owner)
+- [ ] Booking creation form (Admin)
+
+---
+
+## Sample Integration Code
+
+### Axios Setup (React/Next.js)
+```javascript
+import axios from 'axios';
+
+const api = axios.create({
+  baseURL: 'http://localhost:3000/api',
+});
+
+// Add token to requests
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('accessToken');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// Handle token refresh
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    if (error.response?.status === 401) {
+      const refreshToken = localStorage.getItem('refreshToken');
+      try {
+        const { data } = await axios.post('/api/auth/refresh', { refreshToken });
+        localStorage.setItem('accessToken', data.data.accessToken);
+        error.config.headers.Authorization = `Bearer ${data.data.accessToken}`;
+        return axios(error.config);
+      } catch {
+        // Redirect to login
+        window.location.href = '/login';
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
+export default api;
+```
+
+### Usage Example
+```javascript
+import api from './api';
+
+// Login
+const login = async (email, password) => {
+  const { data } = await api.post('/auth/login', {
+    email,
+    password,
+    deviceId: generateDeviceId(),
+  });
+  
+  localStorage.setItem('accessToken', data.data.accessToken);
+  localStorage.setItem('refreshToken', data.data.refreshToken);
+  return data.data.user;
+};
+
+// Get hoardings
+const getHoardings = async (filters) => {
+  const { data } = await api.get('/hoardings', { params: filters });
+  return data.data;
+};
+```
