@@ -1657,7 +1657,7 @@ export class BlockHoardingService {
     fitterId?: string,
   ): Promise<void> {
     const roleLower = String(actorRoleName || '').toLowerCase();
-    if (!['owner', 'manager', 'admin'].includes(roleLower)) {
+    if (!['owner', 'manager', 'admin', 'supervisor'].includes(roleLower)) {
       throw new ForbiddenError('Not allowed');
     }
 

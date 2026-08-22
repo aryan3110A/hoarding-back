@@ -34,7 +34,7 @@ router.get(
 router.get(
   '/notifications',
   authenticate,
-  authorize(['sales', 'owner', 'manager', 'admin', 'designer', 'supervisor']),
+  authorize(['sales', 'owner', 'manager', 'admin', 'designer', 'supervisor', 'fitter']),
   (req, res) => {
     const userId = String((req as any).user?.id || '');
     if (!userId) {
@@ -55,6 +55,31 @@ router.get(
 
     req.on('close', () => {
       eventBus.off('notification', onEvent);
+      try {
+        res.end();
+      } catch (_) {}
+    });
+  },
+);
+
+// Server-Sent Events for fitter installation status updates
+router.get(
+  '/fitter-status',
+  authenticate,
+  authorize(['owner', 'manager', 'admin', 'supervisor', 'fitter', 'sales']),
+  (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    const onEvent = (payload: unknown) => {
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+    eventBus.on('fitter-status', onEvent);
+
+    req.on('close', () => {
+      eventBus.off('fitter-status', onEvent);
       try {
         res.end();
       } catch (_) {}

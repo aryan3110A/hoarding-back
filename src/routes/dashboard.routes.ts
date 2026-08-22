@@ -56,6 +56,9 @@ router.get(
   dashboardController.getDesignerDashboard,
 );
 
+// Fitter installation dashboard
+router.get('/fitter', authorize(['fitter']), dashboardController.getFitterDashboard);
+
 // Expiring contracts for dashboard (owner/manager/admin)
 router.get(
   '/expiring-contracts',

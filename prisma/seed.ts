@@ -9,7 +9,17 @@ async function main() {
   /**
    * 1. Ensure Roles exist
    */
-  const roles = ['owner', 'admin', 'manager', 'sales', 'designer', 'supervisor', 'accountant'];
+  const roles = [
+    'owner',
+    'admin',
+    'manager',
+    'sales',
+    'sales_head',
+    'designer',
+    'supervisor',
+    'fitter',
+    'accountant',
+  ];
   const roleMap: Record<string, number> = {};
 
   for (const roleName of roles) {
@@ -32,8 +42,10 @@ async function main() {
     { name: 'Admin User', email: 'admin@demo.com', role: 'admin' },
     { name: 'Manager User', email: 'manager@demo.com', role: 'manager' },
     { name: 'Sales User', email: 'sales@demo.com', role: 'sales' },
+    { name: 'Sales Head User', email: 'saleshead@demo.com', role: 'sales_head' },
     { name: 'Designer User', email: 'designer@demo.com', role: 'designer' },
     { name: 'Supervisor User', email: 'supervisor@demo.com', role: 'supervisor' },
+    { name: 'Fitter User', email: 'fitter@demo.com', role: 'fitter' },
     { name: 'Accountant User', email: 'accountant@demo.com', role: 'accountant' },
   ];
 
