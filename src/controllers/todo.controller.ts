@@ -28,6 +28,7 @@ export class TodoController {
         dueDate: body.dueDate,
         visibility: body.visibility,
         roleName: body.roleName,
+        tags: body.tags,
         createdById: req.user.id,
       });
       res.status(201).json(ApiResponse.success(item, 'Todo item created'));
@@ -50,6 +51,7 @@ export class TodoController {
           status: body.status,
           visibility: body.visibility,
           roleName: body.roleName,
+          tags: body.tags,
         },
         {
           id: req.user.id,

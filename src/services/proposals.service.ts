@@ -969,35 +969,53 @@ export class ProposalsService {
       String(proposal.client?.companyName || '').trim() ||
       String(proposal.client?.name || '').trim() ||
       '—';
-    doc.text(`Client: ${clientDisplayName}`);
-    if (proposal.client?.email) doc.text(`Email: ${proposal.client.email}`);
+    doc.text(`Company Name: ${String(proposal.client?.companyName || '').trim() || '—'}`);
+    doc.text(`Client Name: ${String(proposal.client?.name || '').trim() || clientDisplayName}`);
     doc.moveDown(0.4);
-    if (includeGst) {
-      doc.text(`GST: Enabled (${gstRatePct}%)`);
-    }
-    if (hasProposalDiscount) {
-      doc.text(`Discount: ${discountType} (${discountValue})`);
-    }
 
-    doc.moveDown(0.8);
-    doc.font(fontBold).text('Financial Summary');
-    doc.font(fontReg);
-    doc.text(`Total Final Hoarding Rate: ₹${indianMoney(finalSubtotal)}`);
-    if (hasProposalDiscount) {
-      doc.text(`Proposal Discount: -₹${indianMoney(discountAmount)}`);
-      doc.text(`Total Final Hoarding Rate (after discount): ₹${indianMoney(finalRateWithoutGst)}`);
+    const showRates = proposal.mode === 'WITH_RATE';
+    const totalFinalRatePerMonth = rows.reduce(
+      (sum: number, r: any) => sum + Math.max(0, toMoney(r.finalRate)),
+      0,
+    );
+    const totalPrintingFromRows = rows.reduce(
+      (sum: number, r: any) => sum + Math.max(0, toMoney(r.printingCharges)),
+      0,
+    );
+    const totalPrintingChargesShown =
+      totalPrintingFromRows > 0 ? totalPrintingFromRows : printingCharges;
+    const totalCumulativeCharges = totalFinalRatePerMonth + totalPrintingChargesShown;
+
+    if (showRates) {
+      if (includeGst) {
+        doc.text(`GST: Enabled (${gstRatePct}%)`);
+      }
+      if (hasProposalDiscount) {
+        doc.text(`Discount: ${discountType} (${discountValue})`);
+      }
+      doc.moveDown(0.8);
+      doc.font(fontBold).text('Commercial Totals');
+      doc.font(fontReg);
+      doc.text(`Total Final Rate Per Month: ₹${indianMoney(totalFinalRatePerMonth)}`);
+      doc.text(`Total Printing Charges: ₹${indianMoney(totalPrintingChargesShown)}`);
+      doc.moveDown(0.2);
+      doc
+        .font(fontBold)
+        .text(`Total Cumulative Charges: ₹${indianMoney(totalCumulativeCharges)}`);
+      doc.font(fontReg);
+      if (hasProposalDiscount) {
+        doc.text(`Proposal Discount: -₹${indianMoney(discountAmount)}`);
+        doc.text(`After discount (hoarding rate): ₹${indianMoney(finalRateWithoutGst)}`);
+      }
+      if (mountingCharges > 0) {
+        doc.text(`Total Mounting Charges: ₹${indianMoney(mountingCharges)}`);
+      }
+      if (includeGst) {
+        doc.text(`GST @${gstRatePct}%: ₹${indianMoney(gstAmount)}`);
+        doc.font(fontBold).text(`Grand Total (final payable): ₹${indianMoney(grandTotal)}`);
+        doc.font(fontReg);
+      }
     }
-    doc.text(`Total Printing Charges: ₹${indianMoney(printingCharges)}`);
-    doc.text(`Total Mounting Charges: ₹${indianMoney(mountingCharges)}`);
-    doc.text(`Subtotal: ₹${indianMoney(subtotal)}`);
-    if (includeGst) {
-      doc.text(`GST @${gstRatePct}%: ₹${indianMoney(gstAmount)}`);
-    } else {
-      doc.text(`GST: ₹0`);
-    }
-    doc.moveDown(0.2);
-    doc.font(fontBold).text(`Grand Total (final payable): ₹${indianMoney(grandTotal)}`);
-    doc.font(fontReg);
 
     doc.moveDown(0.8);
     doc
@@ -1006,7 +1024,6 @@ export class ProposalsService {
       .text('The proposed hoardings are subject to availability.', { align: 'left' });
     doc.fillColor('#000000');
 
-    const showRates = proposal.mode === 'WITH_RATE';
     const col = showRates
       ? {
           sn: 24,
@@ -1566,14 +1583,11 @@ export class ProposalsService {
     doc.fontSize(22).text('Hoarding Proposal', { align: 'center' });
     doc.moveDown(1.5);
     if (client) {
-      const clientDisplayName =
-        String(client.companyName || '').trim() ||
-        String(client.name || '').trim() ||
-        '—';
-      doc.fontSize(12).text(`Client Name: ${clientDisplayName}`);
+      doc.fontSize(12);
       doc.moveDown(0.2);
+      doc.text(`Company Name: ${String(client.companyName || '').trim() || '—'}`);
+      doc.text(`Client Name: ${String(client.name || '').trim() || '—'}`);
       if (client.phone) doc.text(`Phone: ${client.phone}`);
-      if (client.email) doc.text(`Email: ${client.email}`);
       if (client.address) doc.text(`Address: ${client.address}`);
     }
     doc.moveDown(1);

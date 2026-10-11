@@ -1016,6 +1016,7 @@ model TodoItem {
   createdBy   User      @relation(fields: [createdById], references: [id])
   visibility  String    @default("private") // private, public, role, company
   roleName    String?   // if visibility is role
+  tags        String?   // comma-separated tags for search/filter
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 }

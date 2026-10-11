@@ -2,6 +2,14 @@ import { prisma } from '../lib/prisma';
 import { NotFoundError, BadRequestError, ForbiddenError } from '../lib/errors';
 import { Prisma } from '@prisma/client';
 
+function normalizeTags(raw: unknown) {
+  const text = String(raw || '')
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+  return text.length ? text.join(', ') : null;
+}
+
 export class TodoService {
   async list(actor: { id: string; roleName: string }) {
     const roleName = String(actor.roleName || '').toLowerCase();
@@ -32,6 +40,7 @@ export class TodoService {
     dueDate?: string | Date;
     visibility?: string;
     roleName?: string;
+    tags?: string;
     createdById: string;
   }) {
     const title = String(data.title || '').trim();
@@ -54,6 +63,7 @@ export class TodoService {
         dueDate: data.dueDate ? new Date(data.dueDate) : null,
         visibility,
         roleName,
+        tags: normalizeTags(data.tags),
         createdById: data.createdById,
       },
       include: {
@@ -73,6 +83,7 @@ export class TodoService {
       status?: string;
       visibility?: string;
       roleName?: string;
+      tags?: string | null;
     },
     actor: { id: string; roleName: string }
   ) {
@@ -124,6 +135,9 @@ export class TodoService {
         }
         updateData.visibility = visibility;
         updateData.roleName = visibility === 'role' ? String(data.roleName || '').toLowerCase() : null;
+      }
+      if (typeof data.tags !== 'undefined') {
+        updateData.tags = normalizeTags(data.tags);
       }
     }
 

@@ -30,8 +30,8 @@ export class CategoryService {
 
   async create(input: { name?: string; actorRole?: string }) {
     const roleName = String(input.actorRole || '').toLowerCase();
-    if (!['owner', 'manager', 'admin'].includes(roleName)) {
-      throw new ForbiddenError('Only Owner/Manager/Admin can create categories');
+    if (!['owner', 'manager', 'admin', 'sales'].includes(roleName)) {
+      throw new ForbiddenError('Only Owner/Manager/Admin/Sales can create categories');
     }
 
     const name = String(input.name || '').trim();

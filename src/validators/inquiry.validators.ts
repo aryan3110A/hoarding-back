@@ -58,8 +58,16 @@ export const createInquirySchema = z.object({
         .or(z.literal(''))
         .transform((v) => (v ? v : undefined)),
       city: z.string().min(1, 'City is required'),
-      area: z.string().min(1, 'Area is required'),
-      location: z.string().min(1, 'Location is required'),
+      area: z
+        .string()
+        .optional()
+        .or(z.literal(''))
+        .transform((v) => (v ? v : undefined)),
+      location: z
+        .string()
+        .optional()
+        .or(z.literal(''))
+        .transform((v) => (v ? v : undefined)),
       purpose: z
         .string()
         .optional()
@@ -96,8 +104,8 @@ export const updateInquirySchema = z.object({
         .optional(),
       email: z.string().email().nullable().optional(),
       city: z.string().min(1).optional(),
-      area: z.string().min(1).optional(),
-      location: z.string().min(1).optional(),
+      area: z.string().optional().nullable(),
+      location: z.string().optional().nullable(),
       purpose: z.string().nullable().optional(),
       status: z.enum(['OPEN', 'LOCKED', 'CLOSED']).optional(),
       performanceStage: inquiryPerformanceStageEnum.optional(),

@@ -11,6 +11,11 @@ router.get(
   authorize(['owner', 'manager', 'sales', 'admin']),
   categoryController.list,
 );
-router.post('/', authenticate, authorize(['owner', 'manager', 'admin']), categoryController.create);
+router.post(
+  '/',
+  authenticate,
+  authorize(['owner', 'manager', 'admin', 'sales']),
+  categoryController.create,
+);
 
 export default router;

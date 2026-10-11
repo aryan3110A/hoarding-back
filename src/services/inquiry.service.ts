@@ -284,8 +284,6 @@ export class InquiryService {
     if (!phone) throw new BadRequestError('Phone is required');
     if (phone.length !== 10) throw new BadRequestError('Phone must be exactly 10 digits');
     if (!city) throw new BadRequestError('City is required');
-    if (!area) throw new BadRequestError('Area is required');
-    if (!location) throw new BadRequestError('Location is required');
     if (nextFollowupDate && nextFollowupDate < startOfToday()) {
       throw new BadRequestError('Next follow-up date cannot be in the past');
     }
