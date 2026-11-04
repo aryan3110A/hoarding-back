@@ -7,6 +7,7 @@ import { Prisma } from '@prisma/client';
 import type { ProposalMode } from '@prisma/client';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../lib/errors';
 import { BlockHoardingService } from './bookingToken.service';
+import { blockQueueService, HOLDING_STATUSES } from './blockQueue.service';
 import { supportsPhase3BlockingSchema } from '../lib/dbCapabilities';
 import { NotificationService } from './notification.service';
 import { UserRepository } from '../repositories/user.repository';
@@ -33,6 +34,36 @@ interface HoardingRow {
 }
 
 type ProposalDiscountType = 'FLAT' | 'PERCENT';
+
+/** What happened to one hoarding when a proposal was finalized. */
+export type FinalizeTokenMeta = {
+  tokenId: string;
+  /** DB queue position: 1 = active block, 2.. = waiting */
+  queuePosition: number;
+  /** BLOCKED = this client now holds the active 48h block; QUEUED = added to the waiting queue */
+  outcome: 'BLOCKED' | 'QUEUED';
+  /** 1-based position in the waiting queue (null when outcome is BLOCKED) */
+  waitingPosition: number | null;
+  expiresAt: Date | null;
+};
+
+const tokenMetaFromRow = (row: {
+  id: string;
+  queuePosition: number;
+  status: string;
+  expiresAt?: Date | null;
+}): FinalizeTokenMeta => {
+  const active = ['BLOCKED', 'EXTENSION_REQUESTED', 'ACTIVE'].includes(
+    String(row.status || '').toUpperCase(),
+  );
+  return {
+    tokenId: String(row.id),
+    queuePosition: Number(row.queuePosition || 0),
+    outcome: active ? 'BLOCKED' : 'QUEUED',
+    waitingPosition: active ? null : Math.max(1, Number(row.queuePosition || 2) - 1),
+    expiresAt: active ? row.expiresAt || null : null,
+  };
+};
 
 type DraftHoardingInput = {
   hoardingId: string;
@@ -191,7 +222,7 @@ export class ProposalsService {
     proposalId: string;
     salesUserId: string;
     hoardingIds: string[];
-    tokenMetaByHoardingId?: Record<string, { tokenId: string; queuePosition: number }>;
+    tokenMetaByHoardingId?: Record<string, FinalizeTokenMeta>;
   }) {
     if (!input.hoardingIds.length) return;
     const notification = new NotificationService();
@@ -227,28 +258,30 @@ export class ProposalsService {
       input.hoardingIds.map(async (hid) => {
         const code = codeById.get(hid) || hid;
         const tokenMeta = input.tokenMetaByHoardingId?.[hid];
-        const queueText = tokenMeta?.queuePosition
-          ? ` You are #${tokenMeta.queuePosition} in queue.`
-          : '';
-        const managementQueueText = tokenMeta?.queuePosition
-          ? ` Queue #${tokenMeta.queuePosition}.`
-          : '';
+        const queued = tokenMeta?.outcome === 'QUEUED';
         const link = tokenMeta?.tokenId
           ? `/booking-tokens/${tokenMeta.tokenId}`
           : `/proposals/${input.proposalId}`;
+        const salesTitle = queued ? 'Added to queue' : 'Hoarding blocked';
+        const salesBody = queued
+          ? `${code} is currently blocked for another client. Client: ${clientName} was added to the waiting queue (position #${tokenMeta?.waitingPosition}).`
+          : `${code} blocked for Client: ${clientName} for 48 hours.`;
+        const mgmtBody = queued
+          ? `${code}: ${salesName} added Client: ${clientName} to the waiting queue (position #${tokenMeta?.waitingPosition}).`
+          : `${code} blocked by ${salesName} for Client: ${clientName}.`;
         await Promise.all([
           notification.notifyUsersIdempotent(
             [input.salesUserId],
-            'Hoarding blocked',
-            `${code} blocked for Client: ${clientName}.${queueText}`,
+            salesTitle,
+            salesBody,
             link,
             `proposal-finalize-block-sales:${input.proposalId}:${hid}`,
           ),
           managementRecipientIds.length > 0
             ? notification.notifyUsersIdempotent(
                 managementRecipientIds,
-                'Hoarding blocked',
-                `${code} blocked by ${salesName} for Client: ${clientName}.${managementQueueText}`,
+                queued ? 'Client added to queue' : 'Hoarding blocked',
+                mgmtBody,
                 link,
                 `proposal-finalize-block-management:${input.proposalId}:${hid}`,
               )
@@ -309,7 +342,7 @@ export class ProposalsService {
         hoardingId: input.hoardingId,
         salesUserId: input.salesUserId,
         status: { in: statuses as any },
-        notes: { contains: marker },
+        OR: [{ proposalId: input.proposalId }, { notes: { contains: marker } }],
       },
       select: { id: true, status: true, hoardingId: true, dateFrom: true, dateTo: true },
     });
@@ -1284,17 +1317,8 @@ export class ProposalsService {
       include: { client: true, hoardings: { orderBy: { orderIndex: 'asc' } }, salesUser: true },
     });
 
-    if (fullProposal?.hoardings?.length) {
-      await this.releaseDraftTokens({
-        proposalId: proposal.id,
-        hoardingIds: fullProposal.hoardings
-          .map((row: { hoardingId?: string | null }) => String(row.hoardingId || ''))
-          .filter(Boolean),
-        salesUserId: proposal.salesUserId,
-        actorId: input.actorId,
-        actorRole: input.actorRole,
-      });
-    }
+    // NOTE: regenerating a PDF must never touch blocks. Drafts do not hold tokens any more, so the
+    // only tokens attached to this proposal are real (finalized) blocks / queue entries.
 
     await this.audit(input.actorId, 'proposal.generate_pdf', proposal.id, { pdfPath: relPath });
     return updated;
@@ -1364,106 +1388,125 @@ export class ProposalsService {
     const now = new Date();
     const blockService = new BlockHoardingService();
     const createdTokenIds: string[] = [];
-    const tokenMetaByHoardingId: Record<string, { tokenId: string; queuePosition: number }> = {};
+    const tokenMetaByHoardingId: Record<string, FinalizeTokenMeta> = {};
     const finalizeDateRange = this.getFinalizeTokenDateRange((full as any).proposalDate);
 
+    // 1) Validate EVERYTHING before any block / queue entry is created, so a rejected finalize
+    //    never leaves tokens behind.
+    const ratePatchInput = (input.finalRates || {}) as Record<string, unknown>;
+    const hoardingRows = await prisma.hoarding.findMany({
+      where: { id: { in: selectedInProposal } },
+      select: { id: true, status: true, code: true, minimumRate: true },
+    } as any);
+    const proposalRows = await prisma.proposalHoarding.findMany({
+      where: { proposalId: proposal.id, hoardingId: { in: selectedInProposal } },
+      select: { hoardingId: true, finalRate: true },
+    });
+    const lineFinalRateByHoardingId = new Map(
+      (proposalRows as Array<{ hoardingId?: string | null; finalRate?: unknown }>)
+        .map((r) => [String(r.hoardingId || ''), toMoney(r.finalRate)] as const)
+        .filter(([hid]: readonly [string, number]) => !!hid),
+    );
+    const hoardingById = new Map((hoardingRows as any[]).map((h) => [String(h.id), h]));
     for (const hid of selectedInProposal) {
-      const existingTokens = await this.findProposalTokens({
-        proposalId: proposal.id,
-        hoardingId: hid,
-        salesUserId: proposal.salesUserId,
-      });
-
-      if (existingTokens.length > 0) {
-        const existing = await prisma.bookingToken.findUnique({
-          where: { id: String(existingTokens[0].id) },
-          select: { id: true, queuePosition: true },
-        });
-        if (existing?.id) {
-          tokenMetaByHoardingId[hid] = {
-            tokenId: String(existing.id),
-            queuePosition: Number(existing.queuePosition || 0),
-          };
-          continue;
-        }
+      const row = hoardingById.get(hid);
+      if (!row) throw new NotFoundError(`Hoarding not found: ${hid}`);
+      const st = normalizeStatus(row.status);
+      if (st === 'booked') {
+        throw new BadRequestError(`Hoarding already booked: ${row.code || hid}`);
+      }
+      if (st === 'live' || st === 'under_process') {
+        throw new BadRequestError(`Hoarding cannot be finalized: ${row.code || hid}`);
       }
 
-      const createdToken = await blockService.createBlock({
-        hoardingId: hid,
-        dateFrom: finalizeDateRange.dateFrom,
-        dateTo: finalizeDateRange.dateTo,
-        notes: this.buildDraftTokenNotes(proposal.id),
-        client: {
-          name: full.client?.name || 'Client',
-          phone: full.client?.phone || '',
-          email: full.client?.email || undefined,
-          companyName: full.client?.companyName || undefined,
-        },
-        salesUserId: proposal.salesUserId,
-        actorRoleName: input.actorRole,
-      });
-
-      createdTokenIds.push(String(createdToken.blockId));
-      tokenMetaByHoardingId[hid] = {
-        tokenId: String(createdToken.blockId),
-        queuePosition: Number(createdToken.queuePosition || 0),
-      };
+      const minimumRate = Math.max(0, toMoney((row as any).minimumRate));
+      const negotiated = ratePatchInput[hid];
+      const hasNegotiated = negotiated != null && Number.isFinite(Number(negotiated));
+      const effectiveFinal = hasNegotiated
+        ? Math.max(0, Number(negotiated))
+        : Math.max(0, toMoney(lineFinalRateByHoardingId.get(hid) || 0));
+      if (effectiveFinal < minimumRate) {
+        const approved = await prisma.rateApprovalRequest.findFirst({
+          where: {
+            proposalId: proposal.id,
+            hoardingId: hid,
+            status: 'APPROVED',
+            proposedRate: { lte: new Prisma.Decimal(effectiveFinal) },
+          },
+        });
+        if (!approved) {
+          throw new ForbiddenError(
+            `Rate approval is required for hoarding ${row.code || hid} before finalizing.`,
+          );
+        }
+      }
     }
 
+    const rollbackCreatedTokens = async () => {
+      for (const tokenId of createdTokenIds) {
+        try {
+          await blockService.cancelToken(String(tokenId), input.actorId, input.actorRole || 'sales');
+        } catch (_) {}
+      }
+    };
+
+    // 2) Block or queue each hoarding. A hoarding that already has an active block (for ANY client,
+    //    even one of this same sales user) puts this client in the waiting queue instead - there is
+    //    never more than one active block per hoarding.
+    try {
+      for (const hid of selectedInProposal) {
+        const existingTokens = await this.findProposalTokens({
+          proposalId: proposal.id,
+          hoardingId: hid,
+          salesUserId: proposal.salesUserId,
+        });
+
+        if (existingTokens.length > 0) {
+          const existing = await prisma.bookingToken.findUnique({
+            where: { id: String(existingTokens[0].id) },
+            select: { id: true, queuePosition: true, status: true, expiresAt: true },
+          });
+          if (existing?.id) {
+            tokenMetaByHoardingId[hid] = tokenMetaFromRow(existing as any);
+            continue;
+          }
+        }
+
+        const createdToken = await blockService.createBlock({
+          hoardingId: hid,
+          dateFrom: finalizeDateRange.dateFrom,
+          dateTo: finalizeDateRange.dateTo,
+          notes: this.buildDraftTokenNotes(proposal.id),
+          proposalId: proposal.id,
+          client: {
+            name: full.client?.name || 'Client',
+            phone: full.client?.phone || '',
+            email: full.client?.email || undefined,
+            companyName: full.client?.companyName || undefined,
+          },
+          salesUserId: proposal.salesUserId,
+          actorRoleName: input.actorRole,
+        });
+
+        if (!createdToken.reused) createdTokenIds.push(String(createdToken.blockId));
+        tokenMetaByHoardingId[hid] = {
+          tokenId: String(createdToken.blockId),
+          queuePosition: Number(createdToken.queuePosition || 0),
+          outcome: createdToken.outcome,
+          waitingPosition: createdToken.waitingPosition,
+          expiresAt: createdToken.expiresAt,
+        };
+      }
+    } catch (error) {
+      await rollbackCreatedTokens();
+      throw error;
+    }
+
+    // 3) Persist negotiated rates + proposal status. hoarding.status is NOT written here: it is
+    //    derived from the tokens (see BlockQueueService.syncHoardingStatus), so every screen agrees.
     let updated;
     try {
       updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-        const hoardingRows = await tx.hoarding.findMany({
-          where: { id: { in: selectedInProposal } },
-          select: { id: true, status: true, code: true, minimumRate: true },
-        } as any);
-
-        const proposalRows = await tx.proposalHoarding.findMany({
-          where: { proposalId: proposal.id, hoardingId: { in: selectedInProposal } },
-          select: { hoardingId: true, finalRate: true },
-        });
-        const lineFinalRateByHoardingId = new Map(
-          proposalRows
-            .map((r) => [String(r.hoardingId || ''), toMoney(r.finalRate)] as const)
-            .filter(([hid]) => !!hid),
-        );
-
-        const byId = new Map(hoardingRows.map((h) => [h.id, h]));
-        const ratePatchInput = input.finalRates || {};
-        for (const hid of selectedInProposal) {
-          const row = byId.get(hid);
-          if (!row) throw new NotFoundError(`Hoarding not found: ${hid}`);
-          const st = normalizeStatus(row.status);
-          if (st === 'booked') {
-            throw new BadRequestError(`Hoarding already booked: ${row.code || hid}`);
-          }
-          if (st === 'live' || st === 'under_process') {
-            throw new BadRequestError(`Hoarding cannot be finalized: ${row.code || hid}`);
-          }
-
-          const minimumRate = Math.max(0, toMoney((row as any).minimumRate));
-          const negotiated = (ratePatchInput as Record<string, unknown>)[hid];
-          const hasNegotiated = negotiated != null && Number.isFinite(Number(negotiated));
-          const effectiveFinal = hasNegotiated
-            ? Math.max(0, Number(negotiated))
-            : Math.max(0, toMoney(lineFinalRateByHoardingId.get(hid) || 0));
-          if (effectiveFinal < minimumRate) {
-            const approved = await tx.rateApprovalRequest.findFirst({
-              where: {
-                proposalId: proposal.id,
-                hoardingId: hid,
-                status: 'APPROVED',
-                proposedRate: { lte: new Prisma.Decimal(effectiveFinal) },
-              },
-            });
-            if (!approved) {
-              throw new ForbiddenError(
-                `Rate approval is required for hoarding ${row.code || hid} before finalizing.`,
-              );
-            }
-          }
-        }
-
         const ratePatches = Object.entries(ratePatchInput)
           .map(([hid, value]) => [String(hid || ''), Number(value)] as const)
           .filter(
@@ -1478,25 +1521,23 @@ export class ProposalsService {
           });
         }
 
-        // Mark hoardings as blocked (not booked).
-        await tx.hoarding.updateMany({
-          where: { id: { in: selectedInProposal } },
-          data: {
-            status: 'blocked',
-          },
-        });
-
-        const rowsAfterUpdate = await tx.proposalHoarding.findMany({
+        // A line counts as finalized when this proposal holds a block / queue entry for it, or
+        // the hoarding is already booked / live.
+        const lines = await tx.proposalHoarding.findMany({
           where: { proposalId: proposal.id },
-          select: {
-            hoarding: {
-              select: { status: true },
-            },
-          },
+          select: { hoardingId: true, hoarding: { select: { status: true } } },
         });
-        const isFullyFinalized = rowsAfterUpdate.every((row) => {
+        const heldRows = await tx.bookingToken.findMany({
+          where: {
+            proposalId: proposal.id,
+            status: { in: [...HOLDING_STATUSES, 'APPROVED', 'CONFIRMED'] as any },
+          },
+          select: { hoardingId: true },
+        });
+        const held = new Set(heldRows.map((r) => String(r.hoardingId)));
+        const isFullyFinalized = lines.every((row) => {
           const st = normalizeStatus(row?.hoarding?.status);
-          return st === 'blocked' || st === 'booked' || st === 'live';
+          return held.has(String(row.hoardingId || '')) || st === 'booked' || st === 'live';
         });
         const nextStatus = isFullyFinalized ? 'FINALIZED' : 'PARTIAL_FINALIZED';
 
@@ -1511,15 +1552,7 @@ export class ProposalsService {
         });
       });
     } catch (error) {
-      for (const tokenId of createdTokenIds) {
-        try {
-          await blockService.cancelToken(
-            String(tokenId),
-            input.actorId,
-            input.actorRole || 'sales',
-          );
-        } catch (_) {}
-      }
+      await rollbackCreatedTokens();
       throw error;
     }
 
@@ -1534,8 +1567,73 @@ export class ProposalsService {
       selectedHoardings: selectedInProposal.length,
       totalHoardings: allHoardingIds.length,
       negotiatedFinalRates: input.finalRates || null,
+      results: Object.fromEntries(
+        Object.entries(tokenMetaByHoardingId).map(([hid, m]) => [
+          hid,
+          { outcome: m.outcome, waitingPosition: m.waitingPosition },
+        ]),
+      ),
     });
-    return updated;
+    return Object.assign({}, updated, { blockResults: tokenMetaByHoardingId });
+  }
+
+  /**
+   * Gives up this proposal's block / queue entry on ONE hoarding ("Unblock" / "Leave queue").
+   * The token is released through the normal queue logic, so if it was the active block the
+   * next client in the queue is promoted with a fresh 48 hours.
+   */
+  async releaseProposalHoarding(input: {
+    proposalId: string;
+    hoardingId: string;
+    actorId: string;
+    actorRole?: string;
+  }) {
+    const role = String(input.actorRole || '').toLowerCase();
+    const proposal = await prisma.proposal.findUnique({ where: { id: input.proposalId } });
+    if (!proposal) throw new NotFoundError('Proposal not found');
+    if (role === 'sales' && proposal.salesUserId !== input.actorId) {
+      throw new ForbiddenError('You can only release hoardings of your own proposals');
+    }
+    if (!['sales', 'owner', 'manager', 'admin'].includes(role)) {
+      throw new ForbiddenError('Not allowed');
+    }
+
+    const tokens = await prisma.bookingToken.findMany({
+      where: {
+        proposalId: proposal.id,
+        hoardingId: input.hoardingId,
+        status: { in: [...HOLDING_STATUSES] as any },
+      },
+      select: { id: true },
+    });
+
+    const svc = new BlockHoardingService();
+    for (const t of tokens) {
+      await svc.cancelToken(String(t.id), input.actorId, input.actorRole);
+    }
+    // Repairs a stale 'blocked' flag if there was nothing to release.
+    await blockQueueService.processHoarding(input.hoardingId);
+
+    const remaining = await prisma.bookingToken.count({
+      where: {
+        proposalId: proposal.id,
+        status: { in: [...HOLDING_STATUSES, 'APPROVED', 'CONFIRMED'] as any },
+      },
+    });
+    const normalized = normalizeStatus(proposal.status);
+    if (normalized === 'finalized' || normalized === 'partial_finalized') {
+      const nextStatus = remaining > 0 ? 'PARTIAL_FINALIZED' : proposal.sentAt ? 'SENT' : 'DRAFT';
+      await prisma.proposal.update({
+        where: { id: proposal.id },
+        data: { status: nextStatus as any },
+      });
+    }
+
+    await this.audit(input.actorId, 'proposal.release_hoarding', proposal.id, {
+      hoardingId: input.hoardingId,
+      releasedTokens: tokens.length,
+    });
+    return { released: tokens.length };
   }
 
   async generateProposalPdf(opts: {
@@ -1721,7 +1819,7 @@ export class ProposalsService {
   }
 
   async getProposalById(id: string) {
-    return prisma.proposal.findUnique({
+    const proposal = await prisma.proposal.findUnique({
       where: { id },
       include: {
         client: true,
@@ -1729,6 +1827,48 @@ export class ProposalsService {
         salesUser: true,
       },
     });
+    if (!proposal) return proposal;
+
+    const hoardingIds = (proposal.hoardings || [])
+      .map((h: { hoardingId?: string | null }) => String(h.hoardingId || ''))
+      .filter(Boolean);
+    if (hoardingIds.length === 0) return proposal;
+
+    // One shared view of "who holds each hoarding" (same data the Blocked tab and the builder use).
+    const [infoMap, ownTokens] = await Promise.all([
+      blockQueueService.getBlockInfoMap(hoardingIds),
+      prisma.bookingToken.findMany({
+        where: {
+          proposalId: id,
+          hoardingId: { in: hoardingIds },
+          status: { in: [...HOLDING_STATUSES] as any },
+        },
+        select: { id: true, hoardingId: true, status: true, queuePosition: true, expiresAt: true },
+      }),
+    ]);
+    const ownByHoarding = new Map(
+      (ownTokens as Array<{ hoardingId: string }>).map((t) => [String(t.hoardingId), t]),
+    );
+
+    const hoardings = (proposal.hoardings as any[]).map((row) => {
+      const hid = String(row.hoardingId || '');
+      const info = infoMap.get(hid) || null;
+      const own = ownByHoarding.get(hid);
+      const stored = normalizeStatus(row.hoarding?.status);
+      // blocked/tokenized only count while a valid active block really exists
+      const status = info
+        ? 'blocked'
+        : stored === 'blocked' || stored === 'tokenized'
+          ? 'available'
+          : row.hoarding?.status;
+      return {
+        ...row,
+        hoarding: row.hoarding ? { ...row.hoarding, status } : row.hoarding,
+        blockInfo: info,
+        blockState: own ? tokenMetaFromRow(own as any) : null,
+      };
+    });
+    return Object.assign({}, proposal, { hoardings });
   }
 
   async requestRateApproval(input: {

@@ -7,6 +7,8 @@ import { Prisma } from '@prisma/client';
 import { eventBus } from '../lib/eventBus';
 import { prisma } from '../lib/prisma';
 import { supportsPhase3BlockingSchema } from '../lib/dbCapabilities';
+import { blockQueueService, HOLDING_STATUSES } from './blockQueue.service';
+import { BlockHoardingService } from './bookingToken.service';
 import { BadRequestError, ForbiddenError, NotFoundError, ConflictError } from '../lib/errors';
 
 const hoardingRepository = new HoardingRepository();
@@ -391,27 +393,17 @@ export class HoardingService {
     const campaignMetaByHoardingId = await this.getLatestCampaignMetaByHoardingIds([id]);
     this.attachCampaignMeta(hoarding, campaignMetaByHoardingId);
 
-    const currentStatus = String(hoarding.status || '').toLowerCase();
-    if (currentStatus === 'tokenized') {
-      const now = new Date();
-      const phase3Enabled = await supportsPhase3BlockingSchema();
-      const activeStatuses = phase3Enabled
-        ? (['BLOCKED', 'EXTENSION_REQUESTED', 'ACTIVE'] as const)
-        : (['ACTIVE'] as const);
-
-      const activeBlock = await prisma.bookingToken.findFirst({
-        where: {
-          hoardingId: id,
-          status: { in: activeStatuses as any },
-          ...(phase3Enabled ? { expiresAt: { gt: now }, releasedAt: null as any } : {}),
-        } as any,
-        select: { id: true },
-      });
-
-      if (activeBlock) {
-        hoarding.status = 'blocked';
-      }
+    // Single source of truth: 'blocked' only while a valid, unexpired active block exists.
+    const blockInfo = await blockQueueService.getBlockInfo(id);
+    const stored = String(hoarding.status || '')
+      .toLowerCase()
+      .trim();
+    if (blockInfo && ['available', 'blocked', 'tokenized', ''].includes(stored)) {
+      hoarding.status = 'blocked';
+    } else if (!blockInfo && (stored === 'blocked' || stored === 'tokenized')) {
+      hoarding.status = 'available';
     }
+    hoarding.blockInfo = blockInfo;
 
     return hoarding;
   }
@@ -499,6 +491,8 @@ export class HoardingService {
       } else if (!isSalesAvailabilityMode) {
         if (effectiveLower === 'available') {
           where.status = { in: ['available', 'tokenized', 'blocked'] } as any;
+        } else if (effectiveLower === 'blocked') {
+          where.status = { in: ['blocked', 'tokenized'] } as any;
         } else {
           where.status = effectiveStatus;
         }
@@ -577,6 +571,11 @@ export class HoardingService {
       (result.hoardings as unknown as Array<{ id?: string }>).map((h) => String(h.id || '')),
     );
 
+    // Same block/queue view used by the Proposal Builder, Blocked tab and every other screen.
+    const blockInfoByHoardingId = await blockQueueService.getBlockInfoMap(
+      (result.hoardings as unknown as Array<{ id?: string }>).map((h) => String(h.id || '')),
+    );
+
     const hoardingsWithFlag = (result.hoardings as unknown as HoardingRow[]).map((h) => {
       const tokens: TokenLite[] = Array.isArray(h.tokens) ? h.tokens : [];
       const hasActiveToken = tokens.some((t: TokenLite) => {
@@ -599,6 +598,14 @@ export class HoardingService {
         normalizedStatus = 'available';
       }
 
+      // Derive blocked status from real tokens (never trust a stale stored 'blocked').
+      const blockInfo = blockInfoByHoardingId.get(String(h.id)) || null;
+      if (blockInfo && ['available', 'blocked', 'tokenized', ''].includes(normalizedStatus)) {
+        normalizedStatus = 'blocked';
+      } else if (!blockInfo && (normalizedStatus === 'blocked' || normalizedStatus === 'tokenized')) {
+        normalizedStatus = 'available';
+      }
+
       const myActiveToken = isSales && user?.id ? myActiveTokenSet.has(String(h.id)) : false;
       const myActiveTokenId =
         isSales && user?.id ? myActiveTokenIdByHoarding.get(String(h.id)) || null : null;
@@ -607,7 +614,8 @@ export class HoardingService {
           ? myDraftProposalIdByHoarding.get(String(h.id)) || null
           : null;
       const enriched = Object.assign({}, h, {
-        hasActiveToken,
+        blockInfo,
+        hasActiveToken: hasActiveToken || !!blockInfo,
         myActiveToken,
         myActiveTokenId,
         myDraftProposalId,
@@ -1446,39 +1454,40 @@ export class HoardingService {
           : 'User';
         throw new ConflictError(`Cannot mark available because already booked by ${byRole}`);
       }
-      if (current === 'available') {
-        return hoardingRepository.findById(id);
+
+      // "Unblock" goes through the real block/queue logic so tokens and hoarding status never
+      // disagree: sales release only their OWN block / queue entries; management releases the
+      // active block (the next client in the queue is then promoted automatically).
+      const holding = (await prisma.bookingToken.findMany({
+        where: { hoardingId: id, status: { in: [...HOLDING_STATUSES] as any } },
+        select: { id: true, salesUserId: true, status: true },
+        orderBy: [{ createdAt: 'asc' }],
+      })) as Array<{ id: string; salesUserId: string; status: string }>;
+
+      const blockSvc = new BlockHoardingService();
+      let toRelease = holding;
+      if (roleLower === 'sales') {
+        toRelease = holding.filter((t) => String(t.salesUserId) === String(actor?.id || ''));
+        if (holding.length > 0 && toRelease.length === 0) {
+          throw new ConflictError(
+            'This hoarding is blocked for another client. You can only release your own block or queue entry.',
+          );
+        }
+      } else {
+        toRelease = holding.filter((t) =>
+          ['BLOCKED', 'EXTENSION_REQUESTED', 'ACTIVE'].includes(String(t.status).toUpperCase()),
+        );
+      }
+      for (const t of toRelease) {
+        await blockSvc.cancelToken(String(t.id), String(actor?.id || ''), roleLower);
       }
 
-      const availableCount = await prismaUnsafe.hoarding.updateMany({
-        where: {
-          id,
-          status: { not: 'booked' } as any,
-        },
-        data: {
-          status: 'available',
-          workflowState: null,
-          bookedById: null,
-          bookedAt: null,
-        },
-      });
-
-      if (!availableCount || availableCount.count !== 1) {
-        throw new ConflictError('This hoarding has already been updated by another user.');
-      }
-
+      // Repairs a stale 'blocked' flag when no token exists; never touches booked/live hoardings.
+      await blockQueueService.processHoarding(id);
       const availableRow = await hoardingRepository.findById(id);
-      try {
-        eventBus.emit('hoarding-status', {
-          hoardingId: id,
-          status: 'available',
-          hasActiveToken: false,
-          updatedAt: new Date().toISOString(),
-        });
-      } catch (_) {}
 
       try {
-        if (roleLower === 'sales' && current === 'blocked' && actor?.id) {
+        if (roleLower === 'sales' && actor?.id && toRelease.length > 0) {
           const code = String((availableRow as any)?.code || id);
           await notificationService.notifyUsers(
             [String(actor.id)],
@@ -1493,39 +1502,12 @@ export class HoardingService {
     }
 
     if (next === 'blocked') {
-      if (current === 'booked') {
-        const byRole = currentRow.bookedBy?.role?.name
-          ? String(currentRow.bookedBy.role.name)
-          : 'User';
-        throw new ConflictError(`Cannot block because already booked by ${byRole}`);
-      }
-      if (current === 'blocked') {
-        return hoardingRepository.findById(id);
-      }
-
-      const blockedCount = await prismaUnsafe.hoarding.updateMany({
-        where: { id, status: { not: 'booked' } as any },
-        data: {
-          status: 'blocked',
-          workflowState: null,
-        },
-      });
-
-      if (!blockedCount || blockedCount.count !== 1) {
-        throw new ConflictError('This hoarding has already been updated by another user.');
-      }
-
-      const blockedRow = await hoardingRepository.findById(id);
-      try {
-        eventBus.emit('hoarding-status', {
-          hoardingId: id,
-          status: 'blocked',
-          hasActiveToken: false,
-          updatedAt: new Date().toISOString(),
-        });
-      } catch (_) {}
-
-      return blockedRow;
+      // A hoarding is blocked by finalizing a proposal (or creating a token) - that creates the
+      // block record. Setting the status by hand would create a "blocked" hoarding that has no
+      // owner and never expires, which is exactly the stale data we must not produce.
+      throw new BadRequestError(
+        'Hoardings are blocked by finalizing a proposal (or creating a token). Manual blocking is not supported.',
+      );
     }
 
     if (current === 'booked') {

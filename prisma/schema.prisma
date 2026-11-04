@@ -268,6 +268,8 @@ model BookingToken {
   createdAt     DateTime    @default(now())
   durationMonths Int
   notes         String?
+  // Proposal that created this block / queue entry (null for manual tokens)
+  proposalId    String?
   paymentPlanType PaymentPlanType?
   billingFrequency BillingFrequency?
   gstApplicable Boolean    @default(false)
@@ -320,6 +322,10 @@ model BookingToken {
   @@index([designerId])
   @@index([fitterId])
   @@index([status, expiresAt])
+  @@index([proposalId])
+  // NOTE: a partial unique index "BookingToken_one_active_block_per_hoarding"
+  // (hoardingId WHERE status IN ('BLOCKED','EXTENSION_REQUESTED')) exists in the DB via
+  // migration 20261029120000_blocking_queue_integrity. Prisma cannot model partial indexes.
 }
 
 enum DesignStatus {
@@ -1017,6 +1023,8 @@ model TodoItem {
   visibility  String    @default("private") // private, public, role, company
   roleName    String?   // if visibility is role
   tags        String?   // comma-separated tags for search/filter
+  locationLink String?  // optional Google Maps / site URL
+  attachments  Json?    // array of uploaded photo assets
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 }

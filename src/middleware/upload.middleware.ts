@@ -1,6 +1,7 @@
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { BadRequestError } from '../lib/errors';
 
 const installationDir = path.resolve(process.cwd(), 'uploads', 'installation');
 const supervisorChecklistDir = path.resolve(process.cwd(), 'uploads', 'supervisor-checklist');
@@ -133,6 +134,61 @@ export const rentPaymentUpload = multer({
   fileFilter: imageFileFilter,
   limits: { files: 1, fileSize: 10 * 1024 * 1024 },
 });
+
+// ---- Task photo attachments --------------------------------------------------------------
+const tasksDir = path.resolve(process.cwd(), 'uploads', 'tasks');
+ensureDir(tasksDir);
+
+export const TASK_ATTACHMENT_MAX_FILES = 10;
+export const TASK_ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024;
+const TASK_ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+
+const taskStorage = multer.diskStorage({
+  destination: (_req: any, _file: any, cb: any) => {
+    ensureDir(tasksDir);
+    cb(null, tasksDir);
+  },
+  filename: (_req: any, file: any, cb: any) => {
+    const safeBase = path
+      .basename(file.originalname)
+      .replace(/[^a-zA-Z0-9._-]/g, '_')
+      .slice(0, 80);
+    const ext = path.extname(safeBase) || '';
+    const name = path.basename(safeBase, ext);
+    cb(null, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${name}${ext}`);
+  },
+});
+
+const taskUploadMulter = multer({
+  storage: taskStorage,
+  fileFilter: (_req: any, file: any, cb: any) => {
+    const mime = String(file.mimetype || '').toLowerCase();
+    if (TASK_ALLOWED_IMAGE_TYPES.includes(mime)) return cb(null, true);
+    cb(new BadRequestError('Only JPG, PNG, WEBP or GIF photos can be attached to a task'));
+  },
+  limits: { files: TASK_ATTACHMENT_MAX_FILES, fileSize: TASK_ATTACHMENT_MAX_BYTES },
+});
+
+/**
+ * Accepts either JSON or multipart/form-data (photos in the `images` field). File type / size /
+ * count problems become clean 400 errors instead of crashing task creation.
+ */
+export function taskAttachmentUpload(req: any, res: any, next: any) {
+  taskUploadMulter.array('images', TASK_ATTACHMENT_MAX_FILES)(req, res, (err: any) => {
+    if (!err) return next();
+    if (err instanceof BadRequestError) return next(err);
+    if (err && err.name === 'MulterError') {
+      const message =
+        err.code === 'LIMIT_FILE_SIZE'
+          ? `Each photo must be smaller than ${Math.round(TASK_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MB`
+          : err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE'
+            ? `You can upload at most ${TASK_ATTACHMENT_MAX_FILES} photos at a time`
+            : 'Invalid photo upload';
+      return next(new BadRequestError(message));
+    }
+    return next(err);
+  });
+}
 
 const maintenanceStorage = multer.diskStorage({
   destination: (_req: any, _file: any, cb: any) => {

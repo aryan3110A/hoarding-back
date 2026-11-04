@@ -12,6 +12,12 @@ import { ContractService } from './contract.service';
 import { BillingEventService } from './billingEvent.service';
 import { NotFoundError, BadRequestError, ForbiddenError, ConflictError } from '../lib/errors';
 import { supportsPhase3BlockingSchema } from '../lib/dbCapabilities';
+import {
+  BlockQueueService,
+  HOLDING_STATUSES,
+  OPERATIONAL_HOARDING_STATUSES,
+  SyncResult,
+} from './blockQueue.service';
 
 const EXPIRY_HOURS = 48; // Phase-3 default block duration
 
@@ -47,6 +53,7 @@ export class BlockHoardingService {
   private clientSvc: ClientService;
   private contractService: ContractService;
   private billingEventService: BillingEventService;
+  private queue: BlockQueueService;
 
   constructor() {
     this.repo = new BookingTokenRepository();
@@ -57,6 +64,7 @@ export class BlockHoardingService {
     this.clientSvc = new ClientService();
     this.contractService = new ContractService();
     this.billingEventService = new BillingEventService();
+    this.queue = new BlockQueueService();
   }
 
   private async getOwnerAndManagerIds(excludeUserId?: string): Promise<string[]> {
@@ -111,115 +119,23 @@ export class BlockHoardingService {
     return Date.now() > d.getTime();
   }
 
-  private async normalizeQueueAndEnsureHeadBlocked(
-    tx: Prisma.TransactionClient,
-    args: { hoardingId: string; from: Date; to: Date },
-  ): Promise<{
-    headTokenId: string | null;
-    headSalesUserId: string | null;
-    headPromotedToBlocked: boolean;
-  }> {
-    // This workflow relies on Phase-3 enum values + columns.
-    // If the DB isn't migrated, callers should use legacy flow.
-    // (We keep this method strict to avoid writing invalid enum values.)
-    await this.assertPhase3EnabledOrThrow();
-    const now = new Date();
-    const rows = await tx.bookingToken.findMany({
-      where: {
-        hoardingId: args.hoardingId,
-        OR: [{ AND: [{ dateFrom: { lte: args.to } }, { dateTo: { gte: args.from } }] }],
-        status: { in: ['PENDING', 'BLOCKED', 'EXTENSION_REQUESTED', 'ACTIVE'] },
-      },
-      orderBy: { createdAt: 'asc' },
-      select: { id: true, status: true, salesUserId: true },
-    });
-
-    let headTokenId: string | null = null;
-    let headSalesUserId: string | null = null;
-    let headPromotedToBlocked = false;
-
-    for (let idx = 0; idx < rows.length; idx += 1) {
-      const row = rows[idx] as unknown as {
-        id: string;
-        status: string;
-        salesUserId: string;
-      };
-      const position = idx + 1;
-
-      if (idx === 0) {
-        headTokenId = row.id;
-        headSalesUserId = row.salesUserId;
-      }
-
-      // Only the head can hold the block.
-      // - EXTENSION_REQUESTED remains head-only and keeps its existing expiresAt until approved.
-      // - BLOCKED remains as-is (do not extend).
-      // - PENDING/ACTIVE is promoted to BLOCKED (set new expiresAt + blockedAt).
-      const normalizedStatus =
-        idx === 0
-          ? String(row.status || '')
-              .toUpperCase()
-              .trim()
-          : 'PENDING';
-
-      if (idx === 0) {
-        if (normalizedStatus === 'EXTENSION_REQUESTED') {
-          await tx.bookingToken.update({
-            where: { id: row.id },
-            data: { queuePosition: position },
-          });
-          continue;
-        }
-
-        if (normalizedStatus === 'BLOCKED') {
-          await tx.bookingToken.update({
-            where: { id: row.id },
-            data: { queuePosition: position },
-          });
-          continue;
-        }
-
-        // Promote to BLOCKED
-        headPromotedToBlocked = true;
-        await tx.bookingToken.update({
-          where: { id: row.id },
-          data: {
-            queuePosition: position,
-            status: 'BLOCKED',
-            blockedAt: now,
-            expiresAt: this.computeExpiresAt(EXPIRY_HOURS),
-          },
-        });
-        continue;
-      }
-
-      // Non-head items are always pending.
-      await tx.bookingToken.update({
-        where: { id: row.id },
-        data: {
-          queuePosition: position,
-          status: 'PENDING',
-          extensionRequestedAt: null,
-          extensionRequestedUntil: null,
-        },
-      });
-    }
-
-    return { headTokenId, headSalesUserId, headPromotedToBlocked };
-  }
-
   async createBlock(input: {
     hoardingId: string;
     dateFrom: string;
     dateTo?: string;
     durationMonths?: number;
     notes?: string;
+    proposalId?: string | null;
     client: { name: string; phone: string; email?: string; companyName?: string };
     salesUserId: string;
     actorRoleName?: string;
   }): Promise<{
     blockId: string;
     queuePosition: number;
+    outcome: 'BLOCKED' | 'QUEUED';
+    waitingPosition: number | null;
+    expiresAt: Date | null;
+    reused?: boolean;
     client: { id: string; name: string; phone: string };
   }> {
     if (!input.hoardingId) throw new BadRequestError('Hoarding is required');
@@ -405,46 +321,74 @@ export class BlockHoardingService {
       return {
         blockId: legacyTokenId,
         queuePosition,
+        outcome: (queuePosition <= 1 ? 'BLOCKED' : 'QUEUED') as 'BLOCKED' | 'QUEUED',
+        waitingPosition: queuePosition <= 1 ? null : queuePosition - 1,
+        expiresAt: queuePosition <= 1 ? this.computeExpiresAt(EXPIRY_HOURS) : null,
         client: { id: String(client.id), name: String(client.name), phone: String(client.phone) },
       };
     }
 
-    // Prevent duplicate queue entries by the same sales user for overlapping range
-    const existingQueueUnknown = await this.repo.findBlockingByHoardingAndSales(
-      input.hoardingId,
-      input.salesUserId,
-      from,
-      to,
-    );
-    if (existingQueueUnknown) {
-      const existing = existingQueueUnknown as unknown as { status?: string; expiresAt?: Date };
-      const st = String(existing.status || '').toUpperCase();
-      if (st === 'BLOCKED' || st === 'EXTENSION_REQUESTED' || st === 'ACTIVE') {
-        const now = new Date();
-        const msLeft = Math.max(0, new Date(existing.expiresAt as Date).getTime() - now.getTime());
-        const minutes = Math.floor(msLeft / 60000);
-        const hours = Math.floor(minutes / 60);
-        const mins = minutes % 60;
-        const remaining = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
-        throw new BadRequestError(
-          `You already have an active block for this hoarding. Try again after: ${remaining}`,
-        );
-      }
-      throw new BadRequestError('You have already joined the queue for this hoarding.');
-    }
-
     // Ensure we have a numeric duration value for DB (0 for short/day bookings)
     const durationNumber: number = typeof duration === 'number' ? duration : 0;
+    const proposalId = input.proposalId ? String(input.proposalId) : null;
+    const noteText = input.notes || null;
 
-    const created = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      // Insert token with provisional position
+    // ONE hoarding = MAXIMUM ONE active block. Everything below runs under a per-hoarding
+    // lock, so two sales users finalizing the same hoarding at the same moment cannot both win:
+    // the first becomes the active block, the other enters the waiting queue (same rule for the
+    // same sales user and for different sales users).
+    const placed = await this.queue.withHoardingLock(input.hoardingId, async (tx) => {
+      const fresh = await tx.hoarding.findUnique({
+        where: { id: input.hoardingId },
+        select: { status: true },
+      });
+      if (!fresh) throw new NotFoundError('Hoarding not found');
+      const freshStatus = String(fresh.status || '')
+        .toLowerCase()
+        .trim();
+      if (freshStatus === 'booked') {
+        throw new ConflictError('This hoarding is already booked and cannot be tokenized.');
+      }
+      if (OPERATIONAL_HOARDING_STATUSES.includes(freshStatus)) {
+        throw new BadRequestError('This hoarding is not available for blocking right now');
+      }
+
+      // The same CLIENT cannot hold/queue the same hoarding twice.
+      const dup = await tx.bookingToken.findFirst({
+        where: {
+          hoardingId: input.hoardingId,
+          clientId: String(client.id),
+          status: { in: [...HOLDING_STATUSES] as any },
+        },
+        select: { id: true, status: true, proposalId: true },
+      });
+      if (dup) {
+        if (proposalId && dup.proposalId === proposalId) {
+          const sync = await this.queue.syncHoardingStatus(tx, input.hoardingId);
+          const row = await tx.bookingToken.findUnique({
+            where: { id: dup.id },
+            select: { id: true, queuePosition: true, status: true, expiresAt: true },
+          });
+          return { row, sync, normalized: null, reused: true };
+        }
+        const dupActive = ['BLOCKED', 'EXTENSION_REQUESTED', 'ACTIVE'].includes(
+          String(dup.status).toUpperCase(),
+        );
+        throw new BadRequestError(
+          dupActive
+            ? 'This client already holds the active block on this hoarding.'
+            : 'This client is already in the waiting queue for this hoarding.',
+        );
+      }
+
       const provisional = await tx.bookingToken.create({
         data: {
           hoarding: { connect: { id: input.hoardingId } },
           salesUser: { connect: { id: input.salesUserId } },
           client: { connect: { id: client.id } },
           durationMonths: durationNumber,
-          notes: input.notes || null,
+          notes: noteText,
+          proposalId,
           dateFrom: from,
           dateTo: to,
           status: 'PENDING',
@@ -455,83 +399,77 @@ export class BlockHoardingService {
         select: { id: true },
       });
 
-      // Normalize FIFO queue for the overlapping range and ensure the head is BLOCKED.
-      await this.normalizeQueueAndEnsureHeadBlocked(tx, {
-        hoardingId: input.hoardingId,
-        from,
-        to,
-      });
-
-      const updated = await tx.bookingToken.findUnique({
+      // Per-hoarding FIFO queue; promotes this token to the active block when nobody holds it.
+      const normalized = await this.queue.normalizeQueue(tx, input.hoardingId);
+      const sync = await this.queue.syncHoardingStatus(tx, input.hoardingId);
+      const row = await tx.bookingToken.findUnique({
         where: { id: provisional.id },
-        select: { id: true, queuePosition: true },
+        select: { id: true, queuePosition: true, status: true, expiresAt: true },
       });
-      return updated;
+      return { row, sync, normalized, reused: false };
     });
 
-    const createdLite = created as unknown as { id: string; queuePosition: number };
+    if (placed.sync.changed) this.queue.emitHoardingStatus(input.hoardingId, placed.sync);
+
+    const createdLite = placed.row as unknown as {
+      id: string;
+      queuePosition: number;
+      status: string;
+      expiresAt: Date;
+    };
+    const isActive = ['BLOCKED', 'EXTENSION_REQUESTED', 'ACTIVE'].includes(
+      String(createdLite.status).toUpperCase(),
+    );
+    const waitingPosition = isActive ? null : Math.max(1, createdLite.queuePosition - 1);
 
     let hoardingCodeForMessage = input.hoardingId;
     try {
-      const hoarding = await this.hoardingRepo.findById(input.hoardingId);
-      hoardingCodeForMessage = hoarding?.code || input.hoardingId;
+      const h = await this.hoardingRepo.findById(input.hoardingId);
+      hoardingCodeForMessage = h?.code || input.hoardingId;
     } catch (_) {
       // ignore
     }
 
-    // Notify sales user
-    const isProposalToken = PROPOSAL_TOKEN_MARKER_RE.test(String(input.notes || ''));
-    if (!isProposalToken) {
-      await this.notification.notifyUsers(
-        [input.salesUserId],
-        'Token created',
-        `You are #${createdLite.queuePosition} in queue for ${hoardingCodeForMessage}.`,
-        `/booking-tokens/${createdLite.id}`,
-      );
-    }
+    // Proposal-driven tokens are announced by the proposal finalize flow itself.
+    const isProposalToken = !!proposalId || PROPOSAL_TOKEN_MARKER_RE.test(String(noteText || ''));
+    if (!placed.reused && !isProposalToken) {
+      try {
+        await this.notification.notifyUsers(
+          [input.salesUserId],
+          isActive ? 'Hoarding blocked' : 'Added to queue',
+          isActive
+            ? `${hoardingCodeForMessage} is blocked for ${client.name} for 48 hours.`
+            : `${hoardingCodeForMessage} is blocked for another client. ${client.name} is #${waitingPosition} in the waiting queue.`,
+          `/booking-tokens/${createdLite.id}`,
+        );
 
-    // Notify Owner + Manager when Sales tokenizes
-    try {
-      if (String(input.actorRoleName || '').toLowerCase() === 'sales') {
-        const recipients = await this.getOwnerManagerSupervisorIds(input.salesUserId);
-        if (recipients.length > 0) {
-          const salesUser = await this.userRepo.findById(input.salesUserId);
-          const salesName = salesUser?.name || 'A salesperson';
-          const hoardingCode = hoardingCodeForMessage;
-          const isProposalToken = PROPOSAL_TOKEN_MARKER_RE.test(String(input.notes || ''));
-          if (!isProposalToken) {
+        if (String(input.actorRoleName || '').toLowerCase() === 'sales') {
+          const recipients = await this.getOwnerManagerSupervisorIds(input.salesUserId);
+          if (recipients.length > 0) {
+            const salesUser = await this.userRepo.findById(input.salesUserId);
+            const salesName = salesUser?.name || 'A salesperson';
             await this.notification.notifyUsers(
               recipients,
-              'Hoarding tokenized',
-              `${hoardingCode} tokenized by ${salesName} for Client: ${client.name} (${duration} months). Queue #${createdLite.queuePosition}.`,
+              isActive ? 'Hoarding blocked' : 'Client added to queue',
+              isActive
+                ? `${hoardingCodeForMessage} blocked by ${salesName} for Client: ${client.name}.`
+                : `${hoardingCodeForMessage}: ${salesName} added Client ${client.name} to the waiting queue (#${waitingPosition}).`,
               `/booking-tokens/${createdLite.id}`,
             );
           }
         }
+      } catch (_) {
+        // notification failures should not block
       }
-    } catch (_) {
-      // notification failures should not block
     }
-
-    // Mark hoarding as tokenized when a blocked token exists
-    try {
-      const active = await this.repo.findActiveByHoarding(input.hoardingId);
-      if ((active as unknown[]).length > 0) {
-        await this.hoardingRepo.update(input.hoardingId, {
-          status: 'tokenized',
-        } as unknown as Prisma.HoardingUpdateInput);
-        eventBus.emit('hoarding-status', {
-          hoardingId: input.hoardingId,
-          status: 'tokenized',
-          hasActiveToken: true,
-          updatedAt: new Date().toISOString(),
-        });
-      }
-    } catch (_) {}
 
     return {
       blockId: createdLite.id,
       queuePosition: createdLite.queuePosition,
+      outcome: (isActive ? 'BLOCKED' : 'QUEUED') as 'BLOCKED' | 'QUEUED',
+      waitingPosition,
+      expiresAt: isActive ? createdLite.expiresAt : null,
+      reused: placed.reused,
       client: { id: String(client.id), name: String(client.name), phone: String(client.phone) },
     };
   }
@@ -716,6 +654,14 @@ export class BlockHoardingService {
 
     const result = (await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       const unsafeTx = tx as unknown as UnsafeTx;
+
+      // Serialise with block/queue operations on the same hoarding before reading the token state.
+      const pre = await tx.bookingToken.findUnique({
+        where: { id },
+        select: { hoardingId: true },
+      });
+      if (!pre) throw new NotFoundError('Token not found');
+      await this.queue.lockHoarding(tx, pre.hoardingId);
 
       const token = (await unsafeTx.bookingToken.findUnique({
         where: { id },
@@ -968,28 +914,14 @@ export class BlockHoardingService {
         },
       });
 
-      // Cancel other tokens for same overlap (ACTIVE only)
-      const others = (await unsafeTx.bookingToken.findMany({
-        where: {
-          hoardingId: token.hoardingId,
-          id: { not: token.id },
-          status: { in: ['PENDING', 'BLOCKED', 'EXTENSION_REQUESTED', 'ACTIVE'] },
-          OR: [{ AND: [{ dateFrom: { lte: token.dateTo } }, { dateTo: { gte: token.dateFrom } }] }],
-        },
-        select: { id: true, salesUserId: true },
-      })) as Array<{ id: string; salesUserId: string }>;
-
-      if (others.length > 0) {
-        await unsafeTx.bookingToken.updateMany({
-          where: { id: { in: others.map((o) => o.id) } },
-          data: {
-            status: 'RELEASED',
-            releasedAt: now,
-            releasedById: actorId,
-            releaseReason: 'approved',
-          },
-        });
-      }
+      // The hoarding is now booked: close the ENTIRE waiting queue (and anything else still
+      // holding it) regardless of dates. No further queue promotion can happen for this hoarding.
+      const others = await this.queue.closeHoldingTokens(tx, token.hoardingId, {
+        exceptTokenId: token.id,
+        actorId,
+        reason: 'booked',
+        now,
+      });
 
       return {
         tokenId: token.id,
@@ -1037,8 +969,8 @@ export class BlockHoardingService {
       if (result.cancelledSalesUserIds.length > 0) {
         await this.notification.notifyUsers(
           result.cancelledSalesUserIds,
-          'Token cancelled',
-          'Another user confirmed booking. Your token was cancelled.',
+          'Queue closed',
+          'This hoarding has been booked by another client. Your block / queue entry was closed.',
           `/hoardings/${result.hoardingId}`,
         );
       }
@@ -1139,8 +1071,22 @@ export class BlockHoardingService {
     }
 
     const now = new Date();
-    const txResult = phase3Enabled
-      ? await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    const txResult: {
+      headTokenId: string | null;
+      headSalesUserId: string | null;
+      headPromotedToBlocked: boolean;
+      sync: SyncResult | null;
+    } = phase3Enabled
+      ? await this.queue.withHoardingLock(token2.hoardingId, async (tx) => {
+          // Re-check inside the lock: the token may have been released / promoted meanwhile.
+          const current = await tx.bookingToken.findUnique({
+            where: { id },
+            select: { status: true },
+          });
+          if (!current || !(HOLDING_STATUSES as readonly string[]).includes(String(current.status))) {
+            throw new ForbiddenError('Only active/pending tokens can be released');
+          }
+
           await tx.bookingToken.update({
             where: { id },
             data: {
@@ -1154,24 +1100,25 @@ export class BlockHoardingService {
             select: { id: true },
           });
 
-          const normalized = await this.normalizeQueueAndEnsureHeadBlocked(tx, {
-            hoardingId: token2.hoardingId,
-            from: token2.dateFrom,
-            to: token2.dateTo,
-          });
-          return normalized;
+          // If the active block was released, the next in the queue is promoted with a fresh
+          // 48 hours; everyone behind moves up one position.
+          const normalized = await this.queue.normalizeQueue(tx, token2.hoardingId);
+          const sync = await this.queue.syncHoardingStatus(tx, token2.hoardingId);
+          return {
+            headTokenId: normalized.headTokenId,
+            headSalesUserId: normalized.headSalesUserId,
+            headPromotedToBlocked: normalized.headPromoted,
+            sync,
+          };
         })
-      : (() => {
-          // Legacy DB (no blockedAt / Phase-3 enum values). Avoid Prisma update() because it
-          // returns all columns and crashes when blockedAt doesn't exist.
-          return prisma.$executeRaw`UPDATE "BookingToken" SET "status" = ${'RELEASED'}::text::"TokenStatus" WHERE "id" = ${id}`.then(
-            () => ({
-              headTokenId: null,
-              headSalesUserId: null,
-              headPromotedToBlocked: false,
-            }),
-          );
-        })();
+      : await prisma.$executeRaw`UPDATE "BookingToken" SET "status" = ${'RELEASED'}::text::"TokenStatus" WHERE "id" = ${id}`.then(
+          () => ({
+            headTokenId: null,
+            headSalesUserId: null,
+            headPromotedToBlocked: false,
+            sync: null,
+          }),
+        );
 
     // Notify the releasing sales user if management released it
     try {
@@ -1190,8 +1137,8 @@ export class BlockHoardingService {
       if (txResult.headPromotedToBlocked && txResult.headSalesUserId && txResult.headTokenId) {
         await this.notification.notifyUsers(
           [txResult.headSalesUserId],
-          'Token promoted',
-          'You are now first in queue and your block is active.',
+          'Queue promoted - hoarding blocked',
+          'Your client moved from the waiting queue to the active block. A fresh 48-hour block has started.',
           `/booking-tokens/${txResult.headTokenId}`,
         );
       }
@@ -1216,7 +1163,11 @@ export class BlockHoardingService {
       }
     } catch (_) {}
 
-    // Recompute hoarding status based on remaining ACTIVE tokens and bookings
+    // Hoarding status is derived from the tokens inside the transaction above (phase-3 schema).
+    if (txResult.sync) {
+      if (txResult.sync.changed) this.queue.emitHoardingStatus(token2.hoardingId, txResult.sync);
+    } else
+    // Legacy (pre phase-3) schema: recompute from remaining ACTIVE tokens and bookings.
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const hoardingId = (token2 as any).hoardingId as string;
@@ -1508,124 +1459,63 @@ export class BlockHoardingService {
       }
       return;
     }
-    const now = new Date();
-    const due = await this.repo.findExpiredBlocked(now);
-    type TokenHead = {
-      id: string;
-      hoardingId: string;
-      dateFrom: Date;
-      dateTo: Date;
-      status: string;
-      salesUserId: string;
-      queuePosition: number;
-    };
-    for (const dUnknown of due) {
-      const d = dUnknown as unknown as TokenHead;
-      // Atomically expire and promote within the same transaction
-      const txResult = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-        const current = await tx.bookingToken.findUnique({
-          where: { id: d.id },
-          select: { id: true, status: true, expiresAt: true },
-        });
-        const st = String((current as any)?.status || '').toUpperCase();
-        if (!['BLOCKED', 'EXTENSION_REQUESTED', 'ACTIVE'].includes(st)) {
-          return {
-            promoted: false,
-            nextSalesUserId: null as string | null,
-            nextTokenId: null as string | null,
-          };
-        }
-        const exp = (current as any)?.expiresAt ? new Date((current as any).expiresAt) : null;
-        if (exp && exp >= now) {
-          return {
-            promoted: false,
-            nextSalesUserId: null as string | null,
-            nextTokenId: null as string | null,
-          };
-        }
-
-        await tx.bookingToken.update({
-          where: { id: d.id },
-          data: { status: 'EXPIRED' },
-        });
-
-        const normalized = await this.normalizeQueueAndEnsureHeadBlocked(tx, {
-          hoardingId: d.hoardingId,
-          from: d.dateFrom,
-          to: d.dateTo,
-        });
-
-        return {
-          promoted: normalized.headPromotedToBlocked,
-          nextSalesUserId: normalized.headSalesUserId,
-          nextTokenId: normalized.headTokenId,
-        };
-      });
-
-      // Notify expired token owner
+    // Automatic expiry + queue promotion, one hoarding at a time (each under its own lock):
+    //   active block expired -> mark EXPIRED -> promote queue position 1 with a FRESH 48 hours
+    //   -> remaining queue moves up -> hoarding status re-derived. No manual action needed.
+    const hoardingIds = await this.queue.findHoardingsNeedingAttention(new Date());
+    for (const hoardingId of hoardingIds) {
+      let result;
       try {
-        await this.notification.notifyUsers(
-          [d.salesUserId],
-          'Token expired',
-          'Your booking token expired.',
-          `/hoardings/${d.hoardingId}`,
-        );
+        result = await this.queue.processHoarding(hoardingId);
+      } catch (error) {
+        console.error('[expireAndPromote] failed for hoarding', hoardingId, error);
+        continue;
+      }
+
+      let code = hoardingId;
+      try {
+        const h = await this.hoardingRepo.findById(hoardingId);
+        code = h?.code || hoardingId;
       } catch (_) {}
 
-      // Notify promoted head
-      try {
-        if (txResult.promoted && txResult.nextSalesUserId && txResult.nextTokenId) {
+      for (const exp of result.expired) {
+        try {
           await this.notification.notifyUsers(
-            [txResult.nextSalesUserId],
-            'Token promoted',
-            'You are now first in queue and your block is active.',
-            `/booking-tokens/${txResult.nextTokenId}`,
+            [exp.salesUserId],
+            'Block expired',
+            `Your 48-hour block on ${code} expired.`,
+            `/hoardings/${hoardingId}`,
           );
-        }
-      } catch (_) {}
+        } catch (_) {}
+      }
 
-      // After processing, recompute hoarding status from remaining ACTIVE tokens and bookings
-      try {
-        const active = await this.repo.findActiveByHoarding(d.hoardingId);
-        if ((active as unknown[]).length > 0) {
-          await this.hoardingRepo.update(d.hoardingId, {
-            status: 'tokenized',
-          } as unknown as Prisma.HoardingUpdateInput);
-          eventBus.emit('hoarding-status', {
-            hoardingId: d.hoardingId,
-            status: 'tokenized',
-            hasActiveToken: true,
-            updatedAt: new Date().toISOString(),
-          });
-        } else {
-          const bookings = await this.bookingRepo.findByHoardingId(d.hoardingId);
-          const now = new Date();
-          const activeBookings = (bookings || []).filter((b) => {
-            const end = b.endDate ? new Date(b.endDate) : null;
-            return !end || end >= now;
-          });
-          const statuses = activeBookings.map((b) =>
-            String((b as unknown as { status?: unknown }).status || '').toLowerCase(),
+      for (const closed of result.closed) {
+        try {
+          await this.notification.notifyUsers(
+            [closed.salesUserId],
+            'Queue closed',
+            `${code} is no longer available. Your block / queue entry was closed.`,
+            `/hoardings/${hoardingId}`,
           );
-          const hasConfirmed = statuses.includes('confirmed');
-          const hasUnderProcess = statuses.includes('under_process');
-          const newStatus = hasConfirmed
-            ? 'under_process'
-            : hasUnderProcess
-              ? 'under_process'
-              : 'available';
-          await this.hoardingRepo.update(d.hoardingId, {
-            status: newStatus,
-          } as unknown as Prisma.HoardingUpdateInput);
-          eventBus.emit('hoarding-status', {
-            hoardingId: d.hoardingId,
-            status: newStatus,
-            hasActiveToken: false,
-            updatedAt: new Date().toISOString(),
-          });
+        } catch (_) {}
+      }
+
+      try {
+        if (result.headPromoted && result.headSalesUserId && result.headTokenId) {
+          await this.notification.notifyUsers(
+            [result.headSalesUserId],
+            'Queue promoted - hoarding blocked',
+            `${code} is now blocked for your client. A fresh 48-hour block has started.`,
+            `/booking-tokens/${result.headTokenId}`,
+          );
         }
       } catch (_) {}
     }
+
+    // Repair any hoarding whose stored status disagrees with its tokens (stale 'blocked' etc.).
+    try {
+      await this.queue.reconcileHoardingStatuses();
+    } catch (_) {}
   }
 
   async listAssignedToDesigner(designerId: string): Promise<unknown[]> {

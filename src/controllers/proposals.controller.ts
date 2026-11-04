@@ -206,6 +206,23 @@ export class ProposalsController {
     }
   }
 
+  /** "Unblock" / "Leave queue" for one hoarding of a proposal. */
+  async releaseHoarding(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+    try {
+      if (!req.user) return res.status(401).json(ApiResponse.error('Unauthorized'));
+      const { id, hoardingId } = req.params;
+      const result = await service.releaseProposalHoarding({
+        proposalId: String(id),
+        hoardingId: String(hoardingId),
+        actorId: req.user.id,
+        actorRole: req.user.role?.name,
+      });
+      res.status(200).json(ApiResponse.success(result, 'Hoarding released'));
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async list(req: AuthenticatedRequest, res: Response, next: NextFunction) {
     try {
       if (!req.user) return res.status(401).json(ApiResponse.error('Unauthorized'));

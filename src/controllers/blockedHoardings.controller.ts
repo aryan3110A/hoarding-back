@@ -4,6 +4,16 @@ import { AuthenticatedRequest } from '../types/authenticated-request';
 import blockedHoardingsService from '../services/blockedHoardings.service';
 
 export class BlockedHoardingsController {
+  async queue(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+    try {
+      if (!req.user) return res.status(401).json(ApiResponse.error('Unauthorized'));
+      const data = await blockedHoardingsService.getQueue(String(req.params.hoardingId));
+      res.status(200).json(ApiResponse.success(data, 'Hoarding block queue'));
+    } catch (error) {
+      next(error);
+    }
+  }
+
   async byClient(req: AuthenticatedRequest, res: Response, next: NextFunction) {
     try {
       if (!req.user) return res.status(401).json(ApiResponse.error('Unauthorized'));

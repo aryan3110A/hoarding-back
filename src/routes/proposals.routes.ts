@@ -40,6 +40,14 @@ router.post(
 // Finalize proposal (mark FINALIZED)
 router.post('/:id/finalize', authenticate, authorize(['sales']), controller.finalize);
 
+// Give up this proposal's block / queue entry on one hoarding (Unblock / Leave queue)
+router.post(
+  '/:id/hoardings/:hoardingId/release',
+  authenticate,
+  authorize(['sales', 'owner', 'manager', 'admin']),
+  controller.releaseHoarding,
+);
+
 // List proposals (sales can see own proposals)
 router.get('/', authenticate, authorize(['sales', 'owner', 'manager', 'admin']), controller.list);
 

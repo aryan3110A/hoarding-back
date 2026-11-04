@@ -199,6 +199,76 @@ export class MediaStorageService {
     };
   }
 
+  private async uploadFileToFirebasePath(file: MulterLikeFile, objectPath: string, meta: Record<string, string>) {
+    const firebaseApp = this.getFirebaseApp();
+    const bucket = getStorage(firebaseApp).bucket();
+    const filename = String(file.filename || file.originalname || `image-${Date.now()}`);
+    const downloadToken = randomUUID();
+    if (!file.path) {
+      throw new BadRequestError('Uploaded file path is missing for Firebase upload');
+    }
+    await bucket.upload(file.path, {
+      destination: objectPath,
+      metadata: {
+        contentType: file.mimetype || 'application/octet-stream',
+        cacheControl: 'public, max-age=31536000',
+        metadata: { firebaseStorageDownloadTokens: downloadToken, ...meta },
+      },
+    });
+    await this.deleteTempFile(file.path);
+    const publicUrl = this.buildFirebaseDownloadUrl(bucket.name, objectPath, downloadToken);
+    return {
+      filename,
+      url: publicUrl,
+      image_url: publicUrl,
+      storage_provider: 'firebase' as const,
+      storage_path: objectPath,
+      original_name: file.originalname ? String(file.originalname) : null,
+      content_type: file.mimetype ? String(file.mimetype) : null,
+      size_bytes: typeof file.size === 'number' ? file.size : null,
+      uploadedAt: new Date().toISOString(),
+    } as StoredImageAsset;
+  }
+
+  /** Photos attached to a Task (local disk under /uploads/tasks, or Firebase when configured). */
+  async storeTaskImages(files: MulterLikeFile[]): Promise<StoredImageAsset[]> {
+    if (this.getProvider() === 'firebase') {
+      const now = new Date();
+      const month = `${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+      return Promise.all(
+        files.map((file) => {
+          const safe = this.sanitizePathSegment(String(file.filename || file.originalname || '')) || `image-${Date.now()}`;
+          return this.uploadFileToFirebasePath(file, `tasks/${month}/${safe}`, {
+            uploadCategory: 'task',
+            originalName: String(file.originalname || safe),
+          });
+        }),
+      );
+    }
+    return files.map((file) =>
+      this.buildLocalAsset(file, `/uploads/tasks/${String(file.filename || '')}`),
+    );
+  }
+
+  /** Best-effort removal of a previously stored asset (explicit "remove photo" / task delete). */
+  async deleteStoredAsset(asset: { storage_provider?: string; storage_path?: string }) {
+    try {
+      const storagePath = String(asset?.storage_path || '').trim();
+      if (!storagePath) return;
+      if (asset.storage_provider === 'firebase') {
+        const bucket = getStorage(this.getFirebaseApp()).bucket();
+        await bucket.file(storagePath).delete({ ignoreNotFound: true } as any);
+        return;
+      }
+      // local: only ever delete inside the uploads/tasks folder
+      const base = path.resolve(process.cwd(), 'uploads', 'tasks');
+      const target = path.resolve(process.cwd(), storagePath.replace(/^\/+/, ''));
+      if (target.startsWith(base + path.sep)) await fs.unlink(target);
+    } catch {
+      // ignore cleanup failures
+    }
+  }
+
   async storeSupervisorChecklistImages(hoardingId: string, files: MulterLikeFile[]) {
     const provider = this.getProvider();
     if (provider === 'firebase') {

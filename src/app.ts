@@ -31,8 +31,17 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// Static files (uploaded images)
-app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
+// Static files (uploaded images). helmet's default "Cross-Origin-Resource-Policy: same-origin"
+// would stop the web app (a different origin) from displaying locally stored uploads, so it is
+// relaxed for this route only.
+app.use(
+  '/uploads',
+  (_req, res, next) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    next();
+  },
+  express.static(path.resolve(process.cwd(), 'uploads')),
+);
 
 // Rate Limiting - More lenient for development (1000 requests per 15 minutes)
 app.use(rateLimit(1000, 15 * 60));

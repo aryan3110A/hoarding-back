@@ -67,8 +67,9 @@ export const startServer = async () => {
       24 * 60 * 60 * 1000,
     );
 
-    // Start Booking Token Expiry/Promotion Job (every 5 minutes)
-    startBookingTokenExpiryJob(5);
+    // Start Booking Token Expiry/Promotion Job (every minute: expire 48h blocks, promote the queue,
+    // repair stale hoarding statuses)
+    startBookingTokenExpiryJob(1);
 
     // Start Contract Expiry Job (run daily)
     // Run immediately once, then every 24 hours

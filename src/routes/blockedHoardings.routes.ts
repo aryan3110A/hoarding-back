@@ -12,4 +12,11 @@ router.get(
   blockedHoardingsController.byClient,
 );
 
+router.get(
+  '/:hoardingId/queue',
+  authenticate,
+  authorize(['owner', 'manager', 'sales', 'supervisor', 'admin']),
+  blockedHoardingsController.queue,
+);
+
 export default router;
